@@ -599,16 +599,17 @@ class ActivityService:
                 else "NOT TIMED OUT"
             )
             balance_value = (
-                f"Remaining {format_minutes(summary['remaining'])} mins"
+                ""
                 if summary["remaining"] >= 0
-                else f"EXCEEDED {format_minutes(abs(summary['remaining']))} mins"
+                else f"Exceeded by {format_minutes(abs(summary['remaining']))} mins"
             )
             tomorrow_date = next_local_date_string(day_start)
-            next_day_status = (
-                "Rest Day"
-                if staff["rest_day_date"] == tomorrow_date
-                else "Scheduled"
-            )
+            remarks = []
+            if staff["rest_day_date"] == tomorrow_date:
+                remarks.append("Rest Day")
+            if balance_value:
+                remarks.append(balance_value)
+            remarks_value = ", ".join(remarks) if remarks else "-"
             row_class = "exceeded" if summary["remaining"] < 0 else ""
             rows.append(
                 f"""
@@ -619,9 +620,8 @@ class ActivityService:
                     <td>{format_minutes(summary['usage']['break'])} mins</td>
                     <td>{format_minutes(summary['usage']['smoke'])} mins</td>
                     <td>{format_minutes(summary['usage']['cr'])} mins</td>
-                    <td>{escape(next_day_status)}</td>
                     <td>{format_minutes(summary['total_used'])} mins</td>
-                    <td>{escape(balance_value)}</td>
+                    <td>{escape(remarks_value)}</td>
                 </tr>
                 """
             )
@@ -685,9 +685,8 @@ class ActivityService:
                 <th>Break</th>
                 <th>Smoke</th>
                 <th>CR</th>
-                <th>Next Day</th>
                 <th>Total Used</th>
-                <th>Status</th>
+                <th>Remarks</th>
             </tr>
         </thead>
         <tbody>

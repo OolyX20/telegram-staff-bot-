@@ -16,7 +16,7 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 - `🏁 Time Out` ends the active activity and means the staff member is still scheduled to work the next day.
 - The bot sends a reminder every 30 seconds only after staff exceed the 60-minute daily limit and still have not pressed `🔙 Back`.
 - If staff go beyond 60 minutes total for the day, the summary highlights the exceeded time.
-- The bot generates an HTML report every day at `1:00 AM` for the previous day, saves it on the server, and sends it only to admin accounts.
+- The bot generates an HTML report every day at `1:00 AM` for the previous day, saves it on the server, and sends it only to admin accounts. The report includes `Break`, `Smoke`, `CR`, `Total Used`, and a `Remarks` column for `Rest Day` and exceeded-time notes.
 - Admins are auto-detected and are not monitored as staff.
 - Admin-only commands:
   - `/report` for all non-admin staff
