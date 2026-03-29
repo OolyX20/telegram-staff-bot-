@@ -14,6 +14,7 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 - `🏁 Time Out` ends the active activity and sends the summary report.
 - The bot sends a reminder every 30 seconds only after staff exceed the 60-minute daily limit and still have not pressed `🔙 Back`.
 - If staff go beyond 60 minutes total for the day, the summary highlights the exceeded time.
+- The bot generates an HTML report every day at `1:00 AM` for the previous day, saves it on the server, and sends it only to admin accounts.
 - Admins are auto-detected and are not monitored as staff.
 - Admin-only commands:
   - `/report` for all non-admin staff
@@ -45,6 +46,7 @@ TIMEZONE=Asia/Manila
 DATABASE_PATH=staff_activity.db
 DAILY_LIMIT_MINUTES=60
 AUTO_CLOSE_CHECK_SECONDS=30
+REPORTS_DIR=reports
 ADMIN_IDS=123456789,987654321
 SUPERVISOR_CHAT_ID=-1001234567890
 ```
@@ -60,6 +62,8 @@ SUPERVISOR_CHAT_ID=-1001234567890
 
 ## Notes
 
-- `ADMIN_IDS` is optional. In groups, Telegram group admins are also treated as admins automatically.
+- `ADMIN_IDS` is required if you want the daily HTML file sent to admins automatically.
+- In groups, Telegram group admins are also treated as admins automatically for command access.
 - `SUPERVISOR_CHAT_ID` is optional. If set, the bot sends alerts for time in, time out, activity start, and activity end.
+- `REPORTS_DIR` is optional. It controls where daily HTML reports are saved on the server.
 - The bot stores data locally in `staff_activity.db`.

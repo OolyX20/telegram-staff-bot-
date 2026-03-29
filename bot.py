@@ -1,9 +1,11 @@
 import logging
 import os
 import sqlite3
+from html import escape
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Dict, Iterable, Optional, Set
 from zoneinfo import ZoneInfo
 
@@ -33,6 +35,7 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "staff_activity.db")
 DAILY_LIMIT_MINUTES = int(os.getenv("DAILY_LIMIT_MINUTES", "60"))
 AUTO_CLOSE_CHECK_SECONDS = int(os.getenv("AUTO_CLOSE_CHECK_SECONDS", "30"))
 SUPERVISOR_CHAT_ID = os.getenv("SUPERVISOR_CHAT_ID", "").strip()
+REPORTS_DIR = Path(os.getenv("REPORTS_DIR", "reports"))
 ADMIN_IDS: Set[int] = {
     int(value.strip())
     for value in os.getenv("ADMIN_IDS", "").split(",")
@@ -105,6 +108,10 @@ def format_duration(total_seconds: float) -> str:
 
 def format_local(timestamp: datetime) -> str:
     return timestamp.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %I:%M:%S %p")
+
+
+def format_local_date(timestamp: datetime) -> str:
+    return timestamp.astimezone(LOCAL_TZ).strftime("%Y-%m-%d")
 
 
 def warning_text(remaining_seconds: float) -> Optional[str]:
@@ -369,6 +376,23 @@ class ActivityRepository:
                 ),
             ).fetchall()
 
+    def get_staff_for_day(self, day_start: datetime, day_end: datetime):
+        with self.connection() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM staff
+                WHERE (shift_start_at IS NOT NULL AND shift_start_at >= ? AND shift_start_at < ?)
+                   OR (last_time_out_at IS NOT NULL AND last_time_out_at >= ? AND last_time_out_at < ?)
+                ORDER BY full_name, username, user_id
+                """,
+                (
+                    day_start.isoformat(),
+                    day_end.isoformat(),
+                    day_start.isoformat(),
+                    day_end.isoformat(),
+                ),
+            ).fetchall()
+
 
 class ActivityService:
     def __init__(self, repository: ActivityRepository) -> None:
@@ -444,6 +468,25 @@ class ActivityService:
     def summary_text(self, user_id: int) -> str:
         return "\n".join(self.summary_lines(user_id))
 
+    def day_summary(self, user_id: int, reference: datetime):
+        day_start, day_end = self._day_bounds(reference)
+        usage = {key: 0.0 for key in ACTIVITIES}
+        sessions = self.repository.get_sessions_for_day(user_id, day_start, day_end)
+        for session in sessions:
+            usage[session["activity_key"]] += self._session_seconds_within_day(
+                session, day_start, day_end, day_end
+            )
+
+        total_used = sum(usage.values())
+        remaining = DAILY_LIMIT_MINUTES * 60 - total_used
+        return {
+            "day_start": day_start,
+            "day_end": day_end,
+            "usage": usage,
+            "total_used": total_used,
+            "remaining": remaining,
+        }
+
     def has_timed_in_today(self, staff: sqlite3.Row) -> bool:
         shift_start = parse_iso(staff["shift_start_at"])
         last_time_out = parse_iso(staff["last_time_out_at"])
@@ -489,6 +532,127 @@ class ActivityService:
         if not found_staff:
             lines.append("No staff are in an activity right now.")
         return "\n".join(lines)
+
+    def build_daily_html_report(self, reference: datetime) -> Path:
+        day_start, day_end = self._day_bounds(reference)
+        report_date = format_local_date(day_start)
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        report_path = REPORTS_DIR / f"staff-report-{report_date}.html"
+
+        rows = []
+        for staff in self.repository.get_staff_for_day(day_start, day_end):
+            if staff["is_admin"]:
+                continue
+
+            summary = self.day_summary(staff["user_id"], day_start)
+            shift_start = parse_iso(staff["shift_start_at"])
+            last_time_out = parse_iso(staff["last_time_out_at"])
+            time_in_value = (
+                format_local(shift_start)
+                if shift_start and day_start <= shift_start < day_end
+                else "N/A"
+            )
+            time_out_value = (
+                format_local(last_time_out)
+                if last_time_out and day_start <= last_time_out < day_end
+                else "NOT TIMED OUT"
+            )
+            balance_value = (
+                f"Remaining {format_minutes(summary['remaining'])} mins"
+                if summary["remaining"] >= 0
+                else f"EXCEEDED {format_minutes(abs(summary['remaining']))} mins"
+            )
+            row_class = "exceeded" if summary["remaining"] < 0 else ""
+            rows.append(
+                f"""
+                <tr class="{row_class}">
+                    <td>{escape(display_name(staff))}</td>
+                    <td>{escape(time_in_value)}</td>
+                    <td>{escape(time_out_value)}</td>
+                    <td>{format_minutes(summary['usage']['break'])} mins</td>
+                    <td>{format_minutes(summary['usage']['smoke'])} mins</td>
+                    <td>{format_minutes(summary['usage']['cr'])} mins</td>
+                    <td>{format_minutes(summary['usage']['parcel'])} mins</td>
+                    <td>{format_minutes(summary['total_used'])} mins</td>
+                    <td>{escape(balance_value)}</td>
+                </tr>
+                """
+            )
+
+        if not rows:
+            rows.append(
+                """
+                <tr>
+                    <td colspan="9">No staff activity found for this date.</td>
+                </tr>
+                """
+            )
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Staff Activity Report - {report_date}</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 24px;
+            color: #1f2937;
+            background: #f8fafc;
+        }}
+        h1 {{
+            margin-bottom: 8px;
+        }}
+        p {{
+            margin-top: 0;
+            color: #475569;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+        }}
+        th, td {{
+            border: 1px solid #cbd5e1;
+            padding: 10px;
+            text-align: left;
+        }}
+        th {{
+            background: #e2e8f0;
+        }}
+        tr.exceeded {{
+            background: #fee2e2;
+        }}
+    </style>
+</head>
+<body>
+    <h1>Staff Activity Report</h1>
+    <p>Report date: {report_date}</p>
+    <table>
+        <thead>
+            <tr>
+                <th>Staff</th>
+                <th>Time In</th>
+                <th>Time Out</th>
+                <th>Break</th>
+                <th>Smoke</th>
+                <th>CR</th>
+                <th>Parcel</th>
+                <th>Total Used</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {''.join(rows)}
+        </tbody>
+    </table>
+</body>
+</html>
+"""
+        report_path.write_text(html, encoding="utf-8")
+        os.chmod(report_path, 0o444)
+        return report_path
 
 
 REPOSITORY = ActivityRepository(DATABASE_PATH)
@@ -776,6 +940,28 @@ async def remind_active_staff(context: ContextTypes.DEFAULT_TYPE) -> None:
             LOGGER.exception("Failed to send reminder to chat %s", session["chat_id"])
 
 
+async def send_daily_html_report(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ADMIN_IDS:
+        LOGGER.warning("Skipping daily HTML report because ADMIN_IDS is empty.")
+        return
+
+    previous_day_reference = utc_now() - timedelta(days=1)
+    report_path = SERVICE.build_daily_html_report(previous_day_reference)
+    report_date = format_local_date(previous_day_reference)
+
+    for admin_id in ADMIN_IDS:
+        try:
+            with report_path.open("rb") as report_file:
+                await context.bot.send_document(
+                    chat_id=admin_id,
+                    document=report_file,
+                    filename=report_path.name,
+                    caption=f"Daily staff HTML report for {report_date}",
+                )
+        except Exception:
+            LOGGER.exception("Failed to send daily HTML report to admin %s", admin_id)
+
+
 def build_application() -> Application:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -790,6 +976,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("timeout", time_out_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.job_queue.run_repeating(remind_active_staff, interval=AUTO_CLOSE_CHECK_SECONDS, first=AUTO_CLOSE_CHECK_SECONDS)
+    app.job_queue.run_daily(
+        send_daily_html_report,
+        time=time(hour=1, minute=0, second=0, tzinfo=LOCAL_TZ),
+        name="daily-html-report",
+    )
     return app
 
 
