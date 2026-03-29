@@ -36,6 +36,7 @@ DAILY_LIMIT_MINUTES = int(os.getenv("DAILY_LIMIT_MINUTES", "60"))
 AUTO_CLOSE_CHECK_SECONDS = int(os.getenv("AUTO_CLOSE_CHECK_SECONDS", "30"))
 SUPERVISOR_CHAT_ID = os.getenv("SUPERVISOR_CHAT_ID", "").strip()
 REPORTS_DIR = Path(os.getenv("REPORTS_DIR", "reports"))
+SHIFT_START_TIME = os.getenv("SHIFT_START_TIME", "09:00")
 ADMIN_IDS: Set[int] = {
     int(value.strip())
     for value in os.getenv("ADMIN_IDS", "").split(",")
@@ -47,6 +48,7 @@ TIME_OUT_LABEL = "\U0001f3c1 Time Out"
 BACK_LABEL = "\U0001f519 Back"
 STATUS_LABEL = "\U0001f4ca Status"
 COLLECT_DATA_LABEL = "\U0001f4e5 Collect Data"
+CUTOFF_REPORT_LABEL = "\U0001f4d1 Cutoff Report"
 BREAK_LABEL = "\u2615 Break"
 SMOKE_LABEL = "\U0001f6ac Smoke"
 CR_LABEL = "\U0001f6bb CR"
@@ -71,6 +73,7 @@ LABEL_TO_ACTION = {
     BACK_LABEL: "back",
     STATUS_LABEL: "status",
     COLLECT_DATA_LABEL: "collect_data",
+    CUTOFF_REPORT_LABEL: "cutoff_report",
     REST_DAY_LABEL: "rest_day",
 }
 LABEL_TO_ACTION.update({activity.label: activity.key for activity in ACTIVITIES.values()})
@@ -88,6 +91,7 @@ STAFF_KEYBOARD = ReplyKeyboardMarkup(
 ADMIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [STATUS_LABEL, COLLECT_DATA_LABEL],
+        [CUTOFF_REPORT_LABEL],
         ["/report", "/active"],
     ],
     resize_keyboard=True,
@@ -126,6 +130,33 @@ def format_local_date(timestamp: datetime) -> str:
 
 def next_local_date_string(reference: datetime) -> str:
     return (reference.astimezone(LOCAL_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def local_date_string(reference: datetime) -> str:
+    return reference.astimezone(LOCAL_TZ).strftime("%Y-%m-%d")
+
+
+def month_start(reference: datetime) -> datetime:
+    local_reference = reference.astimezone(LOCAL_TZ)
+    return local_reference.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+
+
+def parse_shift_start_time() -> tuple[int, int]:
+    hour_text, minute_text = SHIFT_START_TIME.split(":", 1)
+    return int(hour_text), int(minute_text)
+
+
+def calculate_late_minutes(timestamp: datetime) -> int:
+    local_timestamp = timestamp.astimezone(LOCAL_TZ)
+    start_hour, start_minute = parse_shift_start_time()
+    scheduled = local_timestamp.replace(
+        hour=start_hour,
+        minute=start_minute,
+        second=0,
+        microsecond=0,
+    )
+    late_seconds = max(0.0, (local_timestamp - scheduled).total_seconds())
+    return int(late_seconds // 60)
 
 
 def warning_text(remaining_seconds: float) -> Optional[str]:
@@ -199,6 +230,22 @@ class ActivityRepository:
                     started_at TEXT NOT NULL,
                     ended_at TEXT,
                     closed_reason TEXT,
+                    FOREIGN KEY (user_id) REFERENCES staff(user_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shift_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    work_date TEXT NOT NULL,
+                    time_in_at TEXT NOT NULL,
+                    time_out_at TEXT,
+                    next_day_status TEXT NOT NULL DEFAULT 'Scheduled',
+                    rest_day_effective_date TEXT,
+                    late_minutes INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY (user_id) REFERENCES staff(user_id)
                 )
                 """
@@ -316,6 +363,19 @@ class ActivityRepository:
                 """,
                 (at.isoformat(), chat_id, user_id),
             )
+            conn.execute(
+                """
+                INSERT INTO shift_records (user_id, chat_id, work_date, time_in_at, late_minutes)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    chat_id,
+                    local_date_string(at),
+                    at.isoformat(),
+                    calculate_late_minutes(at),
+                ),
+            )
 
     def set_time_out(self, user_id: int, chat_id: int, at: datetime) -> None:
         with self.connection() as conn:
@@ -326,6 +386,14 @@ class ActivityRepository:
                 WHERE user_id = ?
                 """,
                 (at.isoformat(), chat_id, user_id),
+            )
+            conn.execute(
+                """
+                UPDATE shift_records
+                SET time_out_at = ?, next_day_status = 'Scheduled', rest_day_effective_date = NULL
+                WHERE user_id = ? AND work_date = ? AND time_out_at IS NULL
+                """,
+                (at.isoformat(), user_id, local_date_string(at)),
             )
 
     def set_rest_day_and_time_out(self, user_id: int, chat_id: int, at: datetime, rest_day_date: str) -> None:
@@ -341,6 +409,16 @@ class ActivityRepository:
                 WHERE user_id = ?
                 """,
                 (at.isoformat(), chat_id, rest_day_date, user_id),
+            )
+            conn.execute(
+                """
+                UPDATE shift_records
+                SET time_out_at = ?,
+                    next_day_status = 'Rest Day',
+                    rest_day_effective_date = ?
+                WHERE user_id = ? AND work_date = ? AND time_out_at IS NULL
+                """,
+                (at.isoformat(), rest_day_date, user_id, local_date_string(at)),
             )
 
     def get_active_session(self, user_id: int) -> Optional[sqlite3.Row]:
@@ -432,6 +510,33 @@ class ActivityRepository:
                     day_start.isoformat(),
                     day_end.isoformat(),
                 ),
+            ).fetchall()
+
+    def get_shift_records_for_range(self, start_date: str, end_date: str):
+        with self.connection() as conn:
+            return conn.execute(
+                """
+                SELECT sr.*, st.full_name, st.username
+                FROM shift_records sr
+                JOIN staff st ON st.user_id = sr.user_id
+                WHERE sr.work_date >= ? AND sr.work_date <= ?
+                ORDER BY st.full_name, st.username, sr.work_date
+                """,
+                (start_date, end_date),
+            ).fetchall()
+
+    def get_staff_for_cutoff_range(self, start_date: str, end_date: str):
+        with self.connection() as conn:
+            return conn.execute(
+                """
+                SELECT DISTINCT st.*
+                FROM shift_records sr
+                JOIN staff st ON st.user_id = sr.user_id
+                WHERE (sr.work_date >= ? AND sr.work_date <= ?)
+                   OR (sr.rest_day_effective_date IS NOT NULL AND sr.rest_day_effective_date >= ? AND sr.rest_day_effective_date <= ?)
+                ORDER BY st.full_name, st.username, st.user_id
+                """,
+                (start_date, end_date, start_date, end_date),
             ).fetchall()
 
 
@@ -700,6 +805,107 @@ class ActivityService:
         os.chmod(report_path, 0o444)
         return report_path
 
+    def build_cutoff_html_report(
+        self,
+        start_date: str,
+        end_date: str,
+        filename_prefix: str = "cutoff-report",
+    ) -> Path:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        report_path = REPORTS_DIR / f"{filename_prefix}-{start_date}-to-{end_date}.html"
+        grouped: Dict[str, list[str]] = {}
+        shift_rows = self.repository.get_shift_records_for_range(start_date, end_date)
+
+        for staff in self.repository.get_staff_for_cutoff_range(start_date, end_date):
+            if staff["is_admin"]:
+                continue
+
+            staff_shift_rows = [
+                row
+                for row in shift_rows
+                if row["user_id"] == staff["user_id"]
+            ]
+            days_worked = len({row["work_date"] for row in staff_shift_rows})
+            rest_days = len(
+                {
+                    row["rest_day_effective_date"]
+                    for row in staff_shift_rows
+                    if row["rest_day_effective_date"]
+                    and start_date <= row["rest_day_effective_date"] <= end_date
+                }
+            )
+            late_minutes = sum(int(row["late_minutes"] or 0) for row in staff_shift_rows)
+            name = display_name(staff)
+            letter = name[0].upper() if name and name[0].isalpha() else "#"
+            grouped.setdefault(letter, []).append(
+                f"{escape(name)}  Days Worked: {days_worked} / Rest Days: {rest_days} / Late: {late_minutes} minutes"
+            )
+
+        sections = []
+        for letter in sorted(grouped):
+            items = "".join(f"<li>{line}</li>" for line in grouped[letter])
+            sections.append(
+                f"""
+                <section>
+                    <h2>{letter}</h2>
+                    <ul>{items}</ul>
+                </section>
+                """
+            )
+
+        if not sections:
+            sections.append(
+                """
+                <section>
+                    <p>No staff records found for this cutoff period.</p>
+                </section>
+                """
+            )
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cutoff Report - {start_date} to {end_date}</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 24px;
+            color: #1f2937;
+            background: #f8fafc;
+        }}
+        h1 {{
+            margin-bottom: 8px;
+        }}
+        h2 {{
+            margin-top: 24px;
+            border-bottom: 1px solid #cbd5e1;
+            padding-bottom: 4px;
+        }}
+        ul {{
+            list-style: none;
+            padding-left: 0;
+        }}
+        li {{
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            padding: 12px;
+            margin-bottom: 10px;
+        }}
+    </style>
+</head>
+<body>
+    <h1>Cutoff Report</h1>
+    <p>Cutoff period: {start_date} to {end_date}</p>
+    {''.join(sections)}
+</body>
+</html>
+"""
+        report_path.write_text(html, encoding="utf-8")
+        os.chmod(report_path, 0o444)
+        return report_path
+
 
 REPOSITORY = ActivityRepository(DATABASE_PATH)
 SERVICE = ActivityService(REPOSITORY)
@@ -845,6 +1051,40 @@ async def collect_data_command(update: Update, context: ContextTypes.DEFAULT_TYP
         LOGGER.exception("Failed to send manual HTML report to admin %s", staff["user_id"])
         await update.message.reply_text(
             "Collect Data failed. Start a private chat with the bot first, then try again.",
+            reply_markup=keyboard_for_staff(staff),
+        )
+
+
+async def cutoff_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if not staff["is_admin"]:
+        await update.message.reply_text("Only admins can use Cutoff Report.", reply_markup=keyboard_for_staff(staff))
+        return
+
+    args = getattr(context, "args", []) or []
+    if len(args) == 2:
+        start_date, end_date = args
+    else:
+        now = utc_now()
+        start_date = format_local_date(month_start(now))
+        end_date = format_local_date(now)
+
+    report_path = SERVICE.build_cutoff_html_report(start_date, end_date)
+    try:
+        await send_html_report_document(
+            context,
+            chat_id=staff["user_id"],
+            report_path=report_path,
+            caption=f"Cutoff report for {start_date} to {end_date}",
+        )
+        await update.message.reply_text(
+            f"Cutoff Report completed for {start_date} to {end_date}. The HTML file was sent privately to your admin account.",
+            reply_markup=keyboard_for_staff(staff),
+        )
+    except Exception:
+        LOGGER.exception("Failed to send cutoff report to admin %s", staff["user_id"])
+        await update.message.reply_text(
+            "Cutoff Report failed. Start a private chat with the bot first, then try again.",
             reply_markup=keyboard_for_staff(staff),
         )
 
@@ -1038,6 +1278,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if action == "collect_data":
         await collect_data_command(update, context)
         return
+    if action == "cutoff_report":
+        await cutoff_report_command(update, context)
+        return
     await start_activity(update, context, action)
 
 
@@ -1103,6 +1346,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("active", active_command))
     app.add_handler(CommandHandler("collect", collect_data_command))
+    app.add_handler(CommandHandler("cutoff", cutoff_report_command))
     app.add_handler(CommandHandler("timein", time_in_command))
     app.add_handler(CommandHandler("timeout", time_out_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
