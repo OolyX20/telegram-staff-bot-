@@ -244,14 +244,21 @@ def is_owner(staff: sqlite3.Row) -> bool:
     return role_of(staff) == ROLE_OWNER
 
 
-async def telegram_admin_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+async def telegram_admin_role(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    staff: Optional[sqlite3.Row] = None,
+) -> Optional[str]:
     chat = update.effective_chat
     user_id = update.effective_user.id
-    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+    chat_id = chat.id if chat.type in {ChatType.GROUP, ChatType.SUPERGROUP} else None
+    if chat_id is None and staff and staff["last_chat_id"]:
+        chat_id = staff["last_chat_id"]
+    if chat_id is None:
         return None
 
     try:
-        member = await context.bot.get_chat_member(chat.id, user_id)
+        member = await context.bot.get_chat_member(chat_id, user_id)
     except Exception:
         LOGGER.exception("Failed to get chat member for role detection")
         return None
@@ -428,7 +435,7 @@ class ActivityRepository:
             )
             conn.execute("DROP TABLE activity_sessions_legacy")
 
-    def upsert_staff(self, user_id: int, username: str, full_name: str, last_chat_id: int) -> None:
+    def upsert_staff(self, user_id: int, username: str, full_name: str, last_chat_id: Optional[int]) -> None:
         default_role = ROLE_STAFF
         with self.connection() as conn:
             conn.execute(
@@ -443,7 +450,7 @@ class ActivityRepository:
                         WHEN staff.role IN (?, ?) THEN 1
                         ELSE 0
                     END,
-                    last_chat_id = excluded.last_chat_id
+                    last_chat_id = COALESCE(excluded.last_chat_id, staff.last_chat_id)
                 """,
                 (
                     user_id,
@@ -689,11 +696,13 @@ class ActivityService:
 
     def register_user(self, update: Update) -> sqlite3.Row:
         user = update.effective_user
+        chat = update.effective_chat
+        last_group_chat_id = chat.id if chat.type in {ChatType.GROUP, ChatType.SUPERGROUP} else None
         self.repository.upsert_staff(
             user_id=user.id,
             username=user.username or "",
             full_name=" ".join(part for part in [user.first_name, user.last_name] if part),
-            last_chat_id=update.effective_chat.id,
+            last_chat_id=last_group_chat_id,
         )
         return self.repository.get_staff(user.id)
 
@@ -1059,7 +1068,7 @@ SERVICE = ActivityService(REPOSITORY)
 
 async def ensure_registered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> sqlite3.Row:
     staff = SERVICE.register_user(update)
-    detected_role = await telegram_admin_role(update, context)
+    detected_role = await telegram_admin_role(update, context, staff)
     final_role = detected_role or role_of(staff)
     if role_of(staff) != final_role:
         REPOSITORY.set_role(staff["user_id"], final_role)
