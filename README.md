@@ -2,20 +2,14 @@
 
 This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes per staff member.
 
-## Security Model
+## Role Model
 
-- The bot now uses stored roles:
-  - `owner`
-  - `admin`
-  - `staff`
-  - `blocked`
 - In the group:
   - Telegram `owner` is auto-detected as `owner`
   - Telegram `admin` is auto-detected as `admin`
   - normal group members are auto-detected as `staff`
-- Only the `owner` can manage security and change roles.
-- Admins can use reports, but cannot approve users or change access.
 - Staff can only use staff activity functions.
+- Only `owner` and `admin` accounts can use report tools.
 
 ## Features
 
@@ -33,13 +27,6 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 
 - Staff only see the Staff Dashboard.
 - Admins and owners use a separate Admin Panel.
-- The owner also gets a Security option for access management.
-
-## Owner Commands
-
-- `/security`
-- `/setrole <@username> <staff|admin|blocked>`
-- `/users`
 
 ## Admin Commands
 
@@ -65,15 +52,11 @@ DAILY_LIMIT_MINUTES=60
 AUTO_CLOSE_CHECK_SECONDS=30
 REPORTS_DIR=reports
 SHIFT_START_TIME=09:00
-OWNER_ID=123456789
-ADMIN_IDS=987654321
 SUPERVISOR_CHAT_ID=-1001234567890
 ```
 
 ## Notes
 
-- `OWNER_ID` is required for owner-only security management.
-- `ADMIN_IDS` is optional bootstrap data. The owner can later change roles with `/setrole`.
-- Users should have a Telegram username if you want to manage their role with `/setrole`.
 - `SHIFT_START_TIME` is used for late-minute calculation in cutoff reports.
 - Cutoff reports are accurate for shift records created after the cutoff-report feature was added.
+- Daily and manual HTML reports are delivered only to accounts currently detected as Telegram group owner/admin.
