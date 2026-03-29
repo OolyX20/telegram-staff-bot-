@@ -94,7 +94,6 @@ ADMIN_PANEL_KEYBOARD = ReplyKeyboardMarkup(
     [
         [STATUS_LABEL, COLLECT_DATA_LABEL],
         [CUTOFF_REPORT_LABEL],
-        ["/report", "/active"],
         [STAFF_DASHBOARD_LABEL],
     ],
     resize_keyboard=True,
@@ -104,7 +103,6 @@ OWNER_PANEL_KEYBOARD = ReplyKeyboardMarkup(
     [
         [STATUS_LABEL, COLLECT_DATA_LABEL],
         [CUTOFF_REPORT_LABEL],
-        ["/report", "/active"],
         [STAFF_DASHBOARD_LABEL],
     ],
     resize_keyboard=True,
