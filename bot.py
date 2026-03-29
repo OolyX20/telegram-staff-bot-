@@ -53,14 +53,13 @@ PARCEL_LABEL = "\U0001f4e6 Parcel"
 class Activity:
     key: str
     label: str
-    limit_minutes: int
 
 
 ACTIVITIES: Dict[str, Activity] = {
-    "break": Activity("break", BREAK_LABEL, 20),
-    "smoke": Activity("smoke", SMOKE_LABEL, 10),
-    "cr": Activity("cr", CR_LABEL, 5),
-    "parcel": Activity("parcel", PARCEL_LABEL, 15),
+    "break": Activity("break", BREAK_LABEL),
+    "smoke": Activity("smoke", SMOKE_LABEL),
+    "cr": Activity("cr", CR_LABEL),
+    "parcel": Activity("parcel", PARCEL_LABEL),
 }
 
 LABEL_TO_ACTION = {
@@ -108,12 +107,29 @@ def format_local(timestamp: datetime) -> str:
     return timestamp.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %I:%M:%S %p")
 
 
+def warning_text(remaining_seconds: float) -> Optional[str]:
+    remaining_minutes = format_minutes(remaining_seconds)
+    if remaining_seconds < 0:
+        return None
+    if remaining_minutes <= 0:
+        return "WARNING: No remaining activity time left for today."
+    if remaining_minutes <= 10:
+        return f"WARNING: Only {remaining_minutes} minutes remaining for today."
+    return None
+
+
 def display_name(row: sqlite3.Row) -> str:
     if row["full_name"]:
         return row["full_name"]
     if row["username"]:
         return f"@{row['username']}"
     return f"User {row['user_id']}"
+
+
+def balance_label(remaining_seconds: float) -> str:
+    if remaining_seconds >= 0:
+        return f"Remaining {format_minutes(remaining_seconds)} mins"
+    return f"EXCEEDED {format_minutes(abs(remaining_seconds))} mins"
 
 
 class ActivityRepository:
@@ -404,55 +420,29 @@ class ActivityService:
         return sum(self.get_day_usage(user_id).values())
 
     def remaining_seconds(self, user_id: int) -> float:
-        return max(0.0, DAILY_LIMIT_MINUTES * 60 - self.total_used_seconds(user_id))
+        return DAILY_LIMIT_MINUTES * 60 - self.total_used_seconds(user_id)
 
     def summary_lines(self, user_id: int) -> Iterable[str]:
         usage = self.get_day_usage(user_id)
         total_used = sum(usage.values())
+        remaining = self.remaining_seconds(user_id)
         lines = ["\u23f1\ufe0f Activity Summary"]
         for activity in ACTIVITIES.values():
             lines.append(f"{activity.label:<12} = {format_minutes(usage[activity.key])} mins")
         lines.append("-------------------------")
         lines.append(f"Total Used   = {format_minutes(total_used)} mins")
-        lines.append(f"Remaining    = {format_minutes(self.remaining_seconds(user_id))} mins")
+        if remaining >= 0:
+            lines.append(f"Remaining    = {format_minutes(remaining)} mins")
+            warning = warning_text(remaining)
+            if warning:
+                lines.append(warning)
+        else:
+            lines.append(f"EXCEEDED BY  = {format_minutes(abs(remaining))} mins")
+            lines.append("WARNING: Staff exceeded the 60-minute daily activity limit.")
         return lines
 
     def summary_text(self, user_id: int) -> str:
         return "\n".join(self.summary_lines(user_id))
-
-    def can_start_activity(self, user_id: int, activity: Activity):
-        remaining = self.remaining_seconds(user_id)
-        if remaining <= 0:
-            return False, (
-                "Break limit reached for today.\n\n"
-                f"Each staff member only has {DAILY_LIMIT_MINUTES} minutes of total activity per day.\n"
-                "You cannot start a new activity until the next day."
-            )
-        if remaining < activity.limit_minutes * 60:
-            return False, (
-                f"{activity.label} needs {activity.limit_minutes} minutes, but you only have "
-                f"{format_minutes(remaining)} minutes left for today.\n\n"
-                f"Each staff member only has {DAILY_LIMIT_MINUTES} minutes of total activity per day."
-            )
-        return True, ""
-
-    def close_expired_sessions(self):
-        now = utc_now()
-        expired = []
-        for session in self.repository.get_all_active_sessions():
-            activity = ACTIVITIES[session["activity_key"]]
-            started_at = datetime.fromisoformat(session["started_at"])
-            limit_at = started_at + timedelta(minutes=activity.limit_minutes)
-            if now >= limit_at:
-                self.repository.end_activity(session["id"], limit_at, "auto_limit")
-                expired.append(
-                    {
-                        "session": session,
-                        "activity": activity,
-                        "ended_at": limit_at,
-                    }
-                )
-        return expired
 
     def report_text(self) -> str:
         staff_rows = self.repository.get_all_staff()
@@ -466,8 +456,9 @@ class ActivityService:
             status = "Timed In" if staff["is_timed_in"] else "Timed Out"
             if active:
                 status = f"Active: {ACTIVITIES[active['activity_key']].label}"
+            balance = self.remaining_seconds(staff["user_id"])
             lines.append(
-                f"{display_name(staff)} | {status} | Used {format_minutes(self.total_used_seconds(staff['user_id']))} mins | Remaining {format_minutes(self.remaining_seconds(staff['user_id']))} mins"
+                f"{display_name(staff)} | {status} | Used {format_minutes(self.total_used_seconds(staff['user_id']))} mins | {balance_label(balance)}"
             )
         if not found_staff:
             lines.append("No non-admin staff records yet.")
@@ -538,11 +529,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "Staff activity monitor is ready.",
         "",
         f"Daily total activity allowance: {DAILY_LIMIT_MINUTES} minutes",
-        "Activity limits:",
-        f"{BREAK_LABEL} = 20 mins",
-        f"{SMOKE_LABEL} = 10 mins",
-        f"{CR_LABEL} = 5 mins",
-        f"{PARCEL_LABEL} = 15 mins",
+        "Activities keep running until staff press Back.",
+        "The bot sends a reminder every 30 seconds if an activity is still running.",
     ]
     if staff["is_admin"]:
         lines.extend(
@@ -574,7 +562,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if active:
         activity = ACTIVITIES[active["activity_key"]]
         started_at = datetime.fromisoformat(active["started_at"])
-        text = f"{text}\n\nCurrent Activity: {activity.label}\nStarted: {format_local(started_at)}"
+        running_seconds = (utc_now() - started_at).total_seconds()
+        text = (
+            f"{text}\n\nCurrent Activity: {activity.label}\n"
+            f"Started: {format_local(started_at)}\n"
+            f"Running Time: {format_duration(running_seconds)}"
+        )
     await update.message.reply_text(text, reply_markup=KEYBOARD)
 
 
@@ -658,6 +651,7 @@ async def back_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     duration_seconds = (now - datetime.fromisoformat(active["started_at"])).total_seconds()
     text = (
         f"{BACK_LABEL} {activity.label} ended.\n"
+        f"Activity Summary: {activity.label}\n"
         f"Used this session: {format_duration(duration_seconds)}\n\n"
         f"{SERVICE.summary_text(staff['user_id'])}"
     )
@@ -690,23 +684,15 @@ async def start_activity(update: Update, context: ContextTypes.DEFAULT_TYPE, act
         return
 
     activity = ACTIVITIES[activity_key]
-    allowed, message = SERVICE.can_start_activity(staff["user_id"], activity)
-    if not allowed:
-        await update.message.reply_text(message, reply_markup=KEYBOARD)
-        await send_supervisor_alert(
-            context,
-            f"{display_name(staff)} was blocked from starting {activity.label}. Reason: {message}",
-        )
-        return
-
     now = utc_now()
     REPOSITORY.start_activity(staff["user_id"], update.effective_chat.id, activity_key, now)
-    ends_at = now + timedelta(minutes=activity.limit_minutes)
+    remaining = SERVICE.remaining_seconds(staff["user_id"])
+    warning = warning_text(remaining)
+    warning_block = f"\n\n{warning}" if warning else ""
     await update.message.reply_text(
         f"{activity.label} started.\n"
-        f"Allowed time: {activity.limit_minutes} mins\n"
-        f"Auto-end: {format_local(ends_at)}\n\n"
-        f"Press {BACK_LABEL} to end this activity early.",
+        f"Started: {format_local(now)}\n"
+        f"Status: Running until you press {BACK_LABEL}.{warning_block}",
         reply_markup=KEYBOARD,
     )
     await send_supervisor_alert(
@@ -744,18 +730,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await start_activity(update, context, action)
 
 
-async def auto_close_expired(context: ContextTypes.DEFAULT_TYPE) -> None:
-    expired = SERVICE.close_expired_sessions()
-    for item in expired:
-        session = item["session"]
+async def remind_active_staff(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for session in REPOSITORY.get_all_active_sessions():
         staff = REPOSITORY.get_staff(session["user_id"])
-        if not staff:
+        if not staff or staff["is_admin"]:
             continue
 
+        started_at = datetime.fromisoformat(session["started_at"])
+        running_seconds = (utc_now() - started_at).total_seconds()
+        summary = SERVICE.summary_text(session["user_id"])
         text = (
-            f"{ACTIVITIES[session['activity_key']].label} reached its "
-            f"{ACTIVITIES[session['activity_key']].limit_minutes}-minute limit and was ended automatically.\n\n"
-            f"{SERVICE.summary_text(session['user_id'])}"
+            f"Reminder: {ACTIVITIES[session['activity_key']].label} is still running.\n"
+            f"Running Time: {format_duration(running_seconds)}\n"
+            f"Press {BACK_LABEL} when the activity is finished.\n\n"
+            f"{summary}"
         )
         try:
             await context.bot.send_message(
@@ -764,12 +752,7 @@ async def auto_close_expired(context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=KEYBOARD,
             )
         except Exception:
-            LOGGER.exception("Failed to send auto-close message to chat %s", session["chat_id"])
-
-        await send_supervisor_alert(
-            context,
-            f"{display_name(staff)} reached the limit for {ACTIVITIES[session['activity_key']].label} at {format_local(item['ended_at'])}.",
-        )
+            LOGGER.exception("Failed to send reminder to chat %s", session["chat_id"])
 
 
 def build_application() -> Application:
@@ -785,7 +768,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("timein", time_in_command))
     app.add_handler(CommandHandler("timeout", time_out_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.job_queue.run_repeating(auto_close_expired, interval=AUTO_CLOSE_CHECK_SECONDS, first=5)
+    app.job_queue.run_repeating(remind_active_staff, interval=AUTO_CLOSE_CHECK_SECONDS, first=AUTO_CLOSE_CHECK_SECONDS)
     return app
 
 

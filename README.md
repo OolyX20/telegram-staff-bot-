@@ -6,15 +6,12 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 
 - Tracks staff by Telegram user ID, so it works in private chat or group chat.
 - Daily total activity allowance: 60 minutes per non-admin staff member.
-- Activity limits:
-  - `☕ Break` = 20 minutes
-  - `🚬 Smoke` = 10 minutes
-  - `🚻 CR` = 5 minutes
-  - `📦 Parcel` = 15 minutes
+- Activities continue running until staff press `🔙 Back`.
 - `⏱️ Time In` is required before any activity can start.
-- `🔙 Back` ends the active activity early and shows used and remaining time.
+- `🔙 Back` ends the active activity and sends that activity summary plus the daily summary.
 - `🏁 Time Out` ends the active activity and sends the summary report.
-- Activities auto-close when their time limit is reached.
+- The bot sends a reminder every 30 seconds if an activity is still running.
+- If staff go beyond 60 minutes total for the day, the summary highlights the exceeded time.
 - Admins are auto-detected and are not monitored as staff.
 - Admin-only commands:
   - `/report` for all non-admin staff
@@ -62,5 +59,5 @@ SUPERVISOR_CHAT_ID=-1001234567890
 ## Notes
 
 - `ADMIN_IDS` is optional. In groups, Telegram group admins are also treated as admins automatically.
-- `SUPERVISOR_CHAT_ID` is optional. If set, the bot sends alerts for time in, time out, activity start, activity end, blocked attempts, and auto-limit closures.
+- `SUPERVISOR_CHAT_ID` is optional. If set, the bot sends alerts for time in, time out, activity start, and activity end.
 - The bot stores data locally in `staff_activity.db`.
