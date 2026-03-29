@@ -38,7 +38,7 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 ## Owner Commands
 
 - `/security`
-- `/setrole <user_id> <staff|admin|blocked>`
+- `/setrole <@username> <staff|admin|blocked>`
 - `/users`
 
 ## Admin Commands
@@ -74,5 +74,6 @@ SUPERVISOR_CHAT_ID=-1001234567890
 
 - `OWNER_ID` is required for owner-only security management.
 - `ADMIN_IDS` is optional bootstrap data. The owner can later change roles with `/setrole`.
+- Users should have a Telegram username if you want to manage their role with `/setrole`.
 - `SHIFT_START_TIME` is used for late-minute calculation in cutoff reports.
 - Cutoff reports are accurate for shift records created after the cutoff-report feature was added.

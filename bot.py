@@ -212,6 +212,16 @@ def display_name(row: sqlite3.Row) -> str:
     return f"User {row['user_id']}"
 
 
+def username_label(row: sqlite3.Row) -> str:
+    if row["username"]:
+        return f"@{row['username']}"
+    return display_name(row)
+
+
+def normalize_username(value: str) -> str:
+    return value.strip().lstrip("@").lower()
+
+
 def balance_label(remaining_seconds: float) -> str:
     if remaining_seconds >= 0:
         return f"Remaining {format_minutes(remaining_seconds)} mins"
@@ -483,6 +493,13 @@ class ActivityRepository:
             return conn.execute(
                 "SELECT * FROM staff WHERE user_id = ?",
                 (user_id,),
+            ).fetchone()
+
+    def get_staff_by_username(self, username: str) -> Optional[sqlite3.Row]:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM staff WHERE LOWER(username) = ?",
+                (normalize_username(username),),
             ).fetchone()
 
     def get_all_staff(self):
@@ -1102,7 +1119,7 @@ async def security_panel_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     await update.message.reply_text(
         "Owner security controls:\n"
-        "/setrole <user_id> <staff|admin|blocked>\n"
+        "/setrole <@username> <staff|admin|blocked>\n"
         "/users\n"
         "/security",
         reply_markup=keyboard_for_role(staff, "admin"),
@@ -1121,12 +1138,12 @@ async def setrole_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     args = getattr(context, "args", []) or []
     if len(args) != 2:
         await update.message.reply_text(
-            "Usage: /setrole <user_id> <staff|admin|blocked>",
+            "Usage: /setrole <@username> <staff|admin|blocked>",
             reply_markup=keyboard_for_role(staff, "admin"),
         )
         return
 
-    user_id = int(args[0])
+    username = normalize_username(args[0])
     role = args[1].lower()
     if role not in {ROLE_STAFF, ROLE_ADMIN, ROLE_BLOCKED}:
         await update.message.reply_text(
@@ -1134,24 +1151,31 @@ async def setrole_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=keyboard_for_role(staff, "admin"),
         )
         return
-    if user_id == OWNER_ID:
+    if not username:
+        await update.message.reply_text(
+            "Username is required. Example: /setrole @username staff",
+            reply_markup=keyboard_for_role(staff, "admin"),
+        )
+        return
+
+    target = REPOSITORY.get_staff_by_username(username)
+    if not target:
+        await update.message.reply_text(
+            "That username is not registered yet. Ask them to set a Telegram username and press /start first.",
+            reply_markup=keyboard_for_role(staff, "admin"),
+        )
+        return
+
+    if target["user_id"] == OWNER_ID:
         await update.message.reply_text(
             "The owner role cannot be changed with /setrole.",
             reply_markup=keyboard_for_role(staff, "admin"),
         )
         return
 
-    target = REPOSITORY.get_staff(user_id)
-    if not target:
-        await update.message.reply_text(
-            "That user is not registered yet. Ask them to press /start first.",
-            reply_markup=keyboard_for_role(staff, "admin"),
-        )
-        return
-
-    REPOSITORY.set_role(user_id, role)
+    REPOSITORY.set_role(target["user_id"], role)
     await update.message.reply_text(
-        f"Updated user {user_id} to role: {role}.",
+        f"Updated {username_label(target)} to role: {role}.",
         reply_markup=keyboard_for_role(staff, "admin"),
     )
 
@@ -1167,7 +1191,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     lines = ["User Roles"]
     for user in REPOSITORY.get_all_staff():
-        lines.append(f"{display_name(user)} | {user['user_id']} | {role_of(user)}")
+        lines.append(f"{username_label(user)} | {display_name(user)} | {role_of(user)}")
     await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff, "admin"))
 
 
