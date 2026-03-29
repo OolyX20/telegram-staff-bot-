@@ -1000,8 +1000,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Staff activity monitor is ready.",
             "",
             f"Daily total activity allowance: {DAILY_LIMIT_MINUTES} minutes",
-            "Activities keep running until staff press Back.",
-            "Use the keyboard to Time In, start an activity, stop it with Back, and choose Time Out or Rest Day at the end of the shift.",
+            "Button guide:",
+            f"{TIME_IN_LABEL} - Start your shift. You can only use this once per day.",
+            f"{TIME_OUT_LABEL} - End your shift. This means you are still scheduled to work tomorrow.",
+            f"{BREAK_LABEL} - Start your break activity.",
+            f"{SMOKE_LABEL} - Start your smoke activity.",
+            f"{CR_LABEL} - Start your CR activity.",
+            f"{REST_DAY_LABEL} - Mark that your day off is tomorrow and end your shift.",
+            f"{BACK_LABEL} - Stop the current activity and send your activity summary.",
+            f"{STATUS_LABEL} - Show your current daily activity summary.",
+            "",
+            "Activities keep running until you press Back.",
+            "Only one activity can be active at a time.",
         ]
         await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff))
 
