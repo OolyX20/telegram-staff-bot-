@@ -736,11 +736,16 @@ async def remind_active_staff(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not staff or staff["is_admin"]:
             continue
 
+        remaining = SERVICE.remaining_seconds(session["user_id"])
+        if remaining >= 0:
+            continue
+
         started_at = datetime.fromisoformat(session["started_at"])
         running_seconds = (utc_now() - started_at).total_seconds()
         summary = SERVICE.summary_text(session["user_id"])
+        staff_name = display_name(staff)
         text = (
-            f"Reminder: {ACTIVITIES[session['activity_key']].label} is still running.\n"
+            f"Reminder for {staff_name}: {ACTIVITIES[session['activity_key']].label} is still running after exceeding the daily 60-minute limit.\n"
             f"Running Time: {format_duration(running_seconds)}\n"
             f"Press {BACK_LABEL} when the activity is finished.\n\n"
             f"{summary}"
