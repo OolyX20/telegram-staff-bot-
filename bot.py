@@ -408,6 +408,15 @@ class ActivityRepository:
                 ON CONFLICT(user_id) DO UPDATE SET
                     username = excluded.username,
                     full_name = excluded.full_name,
+                    role = CASE
+                        WHEN excluded.user_id = ? THEN ?
+                        ELSE staff.role
+                    END,
+                    is_admin = CASE
+                        WHEN excluded.user_id = ? THEN 1
+                        WHEN staff.role IN (?, ?) THEN 1
+                        ELSE 0
+                    END,
                     last_chat_id = excluded.last_chat_id
                 """,
                 (
@@ -417,6 +426,11 @@ class ActivityRepository:
                     default_role,
                     int(default_role in {ROLE_OWNER, ROLE_ADMIN}),
                     last_chat_id,
+                    OWNER_ID,
+                    ROLE_OWNER,
+                    OWNER_ID,
+                    ROLE_OWNER,
+                    ROLE_ADMIN,
                 ),
             )
 
