@@ -1,0 +1,799 @@
+import logging
+import os
+import sqlite3
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Iterable, Optional, Set
+from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+from telegram import ReplyKeyboardMarkup, Update
+from telegram.constants import ChatMemberStatus, ChatType
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+
+load_dotenv()
+
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    level=logging.INFO,
+)
+LOGGER = logging.getLogger(__name__)
+
+UTC = timezone.utc
+LOCAL_TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Manila"))
+DATABASE_PATH = os.getenv("DATABASE_PATH", "staff_activity.db")
+DAILY_LIMIT_MINUTES = int(os.getenv("DAILY_LIMIT_MINUTES", "60"))
+AUTO_CLOSE_CHECK_SECONDS = int(os.getenv("AUTO_CLOSE_CHECK_SECONDS", "30"))
+SUPERVISOR_CHAT_ID = os.getenv("SUPERVISOR_CHAT_ID", "").strip()
+ADMIN_IDS: Set[int] = {
+    int(value.strip())
+    for value in os.getenv("ADMIN_IDS", "").split(",")
+    if value.strip()
+}
+
+TIME_IN_LABEL = "\u23f1\ufe0f Time In"
+TIME_OUT_LABEL = "\U0001f3c1 Time Out"
+BACK_LABEL = "\U0001f519 Back"
+STATUS_LABEL = "\U0001f4ca Status"
+BREAK_LABEL = "\u2615 Break"
+SMOKE_LABEL = "\U0001f6ac Smoke"
+CR_LABEL = "\U0001f6bb CR"
+PARCEL_LABEL = "\U0001f4e6 Parcel"
+
+
+@dataclass(frozen=True)
+class Activity:
+    key: str
+    label: str
+    limit_minutes: int
+
+
+ACTIVITIES: Dict[str, Activity] = {
+    "break": Activity("break", BREAK_LABEL, 20),
+    "smoke": Activity("smoke", SMOKE_LABEL, 10),
+    "cr": Activity("cr", CR_LABEL, 5),
+    "parcel": Activity("parcel", PARCEL_LABEL, 15),
+}
+
+LABEL_TO_ACTION = {
+    TIME_IN_LABEL: "time_in",
+    TIME_OUT_LABEL: "time_out",
+    BACK_LABEL: "back",
+    STATUS_LABEL: "status",
+}
+LABEL_TO_ACTION.update({activity.label: activity.key for activity in ACTIVITIES.values()})
+
+KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [TIME_IN_LABEL, TIME_OUT_LABEL],
+        [BREAK_LABEL, SMOKE_LABEL],
+        [CR_LABEL, PARCEL_LABEL],
+        [BACK_LABEL, STATUS_LABEL],
+    ],
+    resize_keyboard=True,
+)
+
+
+def utc_now() -> datetime:
+    return datetime.now(tz=UTC)
+
+
+def parse_iso(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    return datetime.fromisoformat(value)
+
+
+def format_minutes(total_seconds: float) -> int:
+    return max(0, int(round(total_seconds / 60)))
+
+
+def format_duration(total_seconds: float) -> str:
+    minutes = max(0, int(total_seconds // 60))
+    seconds = max(0, int(total_seconds % 60))
+    if seconds == 0:
+        return f"{minutes} mins"
+    return f"{minutes} mins {seconds} secs"
+
+
+def format_local(timestamp: datetime) -> str:
+    return timestamp.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %I:%M:%S %p")
+
+
+def display_name(row: sqlite3.Row) -> str:
+    if row["full_name"]:
+        return row["full_name"]
+    if row["username"]:
+        return f"@{row['username']}"
+    return f"User {row['user_id']}"
+
+
+class ActivityRepository:
+    def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
+        self._initialize()
+
+    @contextmanager
+    def connection(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _initialize(self) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS staff (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    full_name TEXT,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    is_timed_in INTEGER NOT NULL DEFAULT 0,
+                    shift_start_at TEXT,
+                    last_time_out_at TEXT,
+                    last_chat_id INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activity_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    activity_key TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    closed_reason TEXT,
+                    FOREIGN KEY (user_id) REFERENCES staff(user_id)
+                )
+                """
+            )
+            self._migrate_legacy_schema(conn)
+
+    def _migrate_legacy_schema(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(staff)").fetchall()
+        }
+        if "chat_id" in columns and "user_id" not in columns:
+            conn.execute("ALTER TABLE staff RENAME TO staff_legacy")
+            conn.execute(
+                """
+                CREATE TABLE staff (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    full_name TEXT,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    is_timed_in INTEGER NOT NULL DEFAULT 0,
+                    shift_start_at TEXT,
+                    last_time_out_at TEXT,
+                    last_chat_id INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO staff (user_id, username, full_name, is_timed_in, shift_start_at, last_time_out_at, last_chat_id)
+                SELECT chat_id, username, full_name, is_timed_in, shift_start_at, last_time_out_at, chat_id
+                FROM staff_legacy
+                """
+            )
+            conn.execute("DROP TABLE staff_legacy")
+
+        session_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(activity_sessions)").fetchall()
+        }
+        if "user_id" not in session_columns:
+            conn.execute("ALTER TABLE activity_sessions RENAME TO activity_sessions_legacy")
+            conn.execute(
+                """
+                CREATE TABLE activity_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    activity_key TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    closed_reason TEXT,
+                    FOREIGN KEY (user_id) REFERENCES staff(user_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO activity_sessions (id, user_id, chat_id, activity_key, started_at, ended_at, closed_reason)
+                SELECT id, chat_id, chat_id, activity_key, started_at, ended_at, closed_reason
+                FROM activity_sessions_legacy
+                """
+            )
+            conn.execute("DROP TABLE activity_sessions_legacy")
+
+    def upsert_staff(
+        self,
+        user_id: int,
+        username: str,
+        full_name: str,
+        is_admin: bool,
+        last_chat_id: int,
+    ) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO staff (user_id, username, full_name, is_admin, last_chat_id)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    full_name = excluded.full_name,
+                    is_admin = excluded.is_admin,
+                    last_chat_id = excluded.last_chat_id
+                """,
+                (user_id, username, full_name, int(is_admin), last_chat_id),
+            )
+
+    def get_staff(self, user_id: int) -> Optional[sqlite3.Row]:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM staff WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+
+    def get_all_staff(self):
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM staff ORDER BY full_name, username, user_id"
+            ).fetchall()
+
+    def set_time_in(self, user_id: int, chat_id: int, at: datetime) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE staff
+                SET is_timed_in = 1, shift_start_at = ?, last_chat_id = ?
+                WHERE user_id = ?
+                """,
+                (at.isoformat(), chat_id, user_id),
+            )
+
+    def set_time_out(self, user_id: int, chat_id: int, at: datetime) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE staff
+                SET is_timed_in = 0, shift_start_at = NULL, last_time_out_at = ?, last_chat_id = ?
+                WHERE user_id = ?
+                """,
+                (at.isoformat(), chat_id, user_id),
+            )
+
+    def get_active_session(self, user_id: int) -> Optional[sqlite3.Row]:
+        with self.connection() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM activity_sessions
+                WHERE user_id = ? AND ended_at IS NULL
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+
+    def get_all_active_sessions(self):
+        with self.connection() as conn:
+            return conn.execute(
+                """
+                SELECT s.*, st.full_name, st.username
+                FROM activity_sessions s
+                JOIN staff st ON st.user_id = s.user_id
+                WHERE s.ended_at IS NULL
+                ORDER BY s.started_at ASC
+                """
+            ).fetchall()
+
+    def start_activity(
+        self,
+        user_id: int,
+        chat_id: int,
+        activity_key: str,
+        started_at: datetime,
+    ) -> int:
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO activity_sessions (user_id, chat_id, activity_key, started_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (user_id, chat_id, activity_key, started_at.isoformat()),
+            )
+            conn.execute(
+                "UPDATE staff SET last_chat_id = ? WHERE user_id = ?",
+                (chat_id, user_id),
+            )
+            return int(cursor.lastrowid)
+
+    def end_activity(self, session_id: int, ended_at: datetime, reason: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE activity_sessions
+                SET ended_at = ?, closed_reason = ?
+                WHERE id = ? AND ended_at IS NULL
+                """,
+                (ended_at.isoformat(), reason, session_id),
+            )
+
+    def get_sessions_for_day(self, user_id: int, day_start: datetime, day_end: datetime):
+        with self.connection() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM activity_sessions
+                WHERE user_id = ?
+                  AND started_at < ?
+                  AND COALESCE(ended_at, ?) > ?
+                ORDER BY started_at ASC
+                """,
+                (
+                    user_id,
+                    day_end.isoformat(),
+                    utc_now().isoformat(),
+                    day_start.isoformat(),
+                ),
+            ).fetchall()
+
+
+class ActivityService:
+    def __init__(self, repository: ActivityRepository) -> None:
+        self.repository = repository
+
+    def register_user(self, update: Update, is_admin: bool) -> sqlite3.Row:
+        user = update.effective_user
+        self.repository.upsert_staff(
+            user_id=user.id,
+            username=user.username or "",
+            full_name=" ".join(part for part in [user.first_name, user.last_name] if part),
+            is_admin=is_admin,
+            last_chat_id=update.effective_chat.id,
+        )
+        return self.repository.get_staff(user.id)
+
+    def _day_bounds(self, reference: Optional[datetime] = None):
+        current = (reference or utc_now()).astimezone(LOCAL_TZ)
+        start_local = current.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_local = start_local + timedelta(days=1)
+        return start_local.astimezone(UTC), end_local.astimezone(UTC)
+
+    def _session_seconds_within_day(
+        self,
+        session: sqlite3.Row,
+        day_start: datetime,
+        day_end: datetime,
+        now: datetime,
+    ) -> float:
+        started_at = datetime.fromisoformat(session["started_at"])
+        ended_at = parse_iso(session["ended_at"]) or now
+        clamped_start = max(started_at, day_start)
+        clamped_end = min(ended_at, day_end)
+        seconds = (clamped_end - clamped_start).total_seconds()
+        return max(0.0, seconds)
+
+    def get_day_usage(self, user_id: int) -> Dict[str, float]:
+        day_start, day_end = self._day_bounds()
+        now = utc_now()
+        usage = {key: 0.0 for key in ACTIVITIES}
+        sessions = self.repository.get_sessions_for_day(user_id, day_start, day_end)
+        for session in sessions:
+            usage[session["activity_key"]] += self._session_seconds_within_day(
+                session, day_start, day_end, now
+            )
+        return usage
+
+    def total_used_seconds(self, user_id: int) -> float:
+        return sum(self.get_day_usage(user_id).values())
+
+    def remaining_seconds(self, user_id: int) -> float:
+        return max(0.0, DAILY_LIMIT_MINUTES * 60 - self.total_used_seconds(user_id))
+
+    def summary_lines(self, user_id: int) -> Iterable[str]:
+        usage = self.get_day_usage(user_id)
+        total_used = sum(usage.values())
+        lines = ["\u23f1\ufe0f Activity Summary"]
+        for activity in ACTIVITIES.values():
+            lines.append(f"{activity.label:<12} = {format_minutes(usage[activity.key])} mins")
+        lines.append("-------------------------")
+        lines.append(f"Total Used   = {format_minutes(total_used)} mins")
+        lines.append(f"Remaining    = {format_minutes(self.remaining_seconds(user_id))} mins")
+        return lines
+
+    def summary_text(self, user_id: int) -> str:
+        return "\n".join(self.summary_lines(user_id))
+
+    def can_start_activity(self, user_id: int, activity: Activity):
+        remaining = self.remaining_seconds(user_id)
+        if remaining <= 0:
+            return False, (
+                "Break limit reached for today.\n\n"
+                f"Each staff member only has {DAILY_LIMIT_MINUTES} minutes of total activity per day.\n"
+                "You cannot start a new activity until the next day."
+            )
+        if remaining < activity.limit_minutes * 60:
+            return False, (
+                f"{activity.label} needs {activity.limit_minutes} minutes, but you only have "
+                f"{format_minutes(remaining)} minutes left for today.\n\n"
+                f"Each staff member only has {DAILY_LIMIT_MINUTES} minutes of total activity per day."
+            )
+        return True, ""
+
+    def close_expired_sessions(self):
+        now = utc_now()
+        expired = []
+        for session in self.repository.get_all_active_sessions():
+            activity = ACTIVITIES[session["activity_key"]]
+            started_at = datetime.fromisoformat(session["started_at"])
+            limit_at = started_at + timedelta(minutes=activity.limit_minutes)
+            if now >= limit_at:
+                self.repository.end_activity(session["id"], limit_at, "auto_limit")
+                expired.append(
+                    {
+                        "session": session,
+                        "activity": activity,
+                        "ended_at": limit_at,
+                    }
+                )
+        return expired
+
+    def report_text(self) -> str:
+        staff_rows = self.repository.get_all_staff()
+        lines = ["\U0001f4cb Staff Report"]
+        found_staff = False
+        for staff in staff_rows:
+            if staff["is_admin"]:
+                continue
+            found_staff = True
+            active = self.repository.get_active_session(staff["user_id"])
+            status = "Timed In" if staff["is_timed_in"] else "Timed Out"
+            if active:
+                status = f"Active: {ACTIVITIES[active['activity_key']].label}"
+            lines.append(
+                f"{display_name(staff)} | {status} | Used {format_minutes(self.total_used_seconds(staff['user_id']))} mins | Remaining {format_minutes(self.remaining_seconds(staff['user_id']))} mins"
+            )
+        if not found_staff:
+            lines.append("No non-admin staff records yet.")
+        return "\n".join(lines)
+
+    def active_staff_text(self) -> str:
+        sessions = self.repository.get_all_active_sessions()
+        lines = ["\U0001f50d Active Staff"]
+        found_staff = False
+        for session in sessions:
+            staff = self.repository.get_staff(session["user_id"])
+            if not staff or staff["is_admin"]:
+                continue
+            found_staff = True
+            lines.append(
+                f"{display_name(staff)} | {ACTIVITIES[session['activity_key']].label} | Started {format_local(datetime.fromisoformat(session['started_at']))}"
+            )
+        if not found_staff:
+            lines.append("No staff are in an activity right now.")
+        return "\n".join(lines)
+
+
+REPOSITORY = ActivityRepository(DATABASE_PATH)
+SERVICE = ActivityService(REPOSITORY)
+
+
+async def is_admin_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user_id = update.effective_user.id
+    if user_id in ADMIN_IDS:
+        return True
+
+    chat = update.effective_chat
+    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return False
+
+    try:
+        member = await context.bot.get_chat_member(chat.id, user_id)
+    except Exception:
+        LOGGER.exception("Failed to get chat member for admin detection")
+        return False
+    return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
+
+
+async def ensure_registered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> sqlite3.Row:
+    is_admin = await is_admin_user(update, context)
+    return SERVICE.register_user(update, is_admin)
+
+
+def monitoring_block_message() -> str:
+    return (
+        "Monitoring is automatically applied to non-admin staff only.\n"
+        "This account is detected as admin, so activity tracking is disabled."
+    )
+
+
+async def send_supervisor_alert(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    if not SUPERVISOR_CHAT_ID:
+        return
+    try:
+        await context.bot.send_message(chat_id=int(SUPERVISOR_CHAT_ID), text=text)
+    except Exception:
+        LOGGER.exception("Failed to send supervisor alert")
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    lines = [
+        "Staff activity monitor is ready.",
+        "",
+        f"Daily total activity allowance: {DAILY_LIMIT_MINUTES} minutes",
+        "Activity limits:",
+        f"{BREAK_LABEL} = 20 mins",
+        f"{SMOKE_LABEL} = 10 mins",
+        f"{CR_LABEL} = 5 mins",
+        f"{PARCEL_LABEL} = 15 mins",
+    ]
+    if staff["is_admin"]:
+        lines.extend(
+            [
+                "",
+                "Admin mode detected.",
+                "Use /report for all staff, /active for ongoing activities, or /status for the team summary.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Use the keyboard to Time In, start an activity, stop it with Back, and Time Out for the summary.",
+            ]
+        )
+    await update.message.reply_text("\n".join(lines), reply_markup=KEYBOARD)
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if staff["is_admin"]:
+        text = f"{SERVICE.active_staff_text()}\n\n{SERVICE.report_text()}"
+        await update.message.reply_text(text, reply_markup=KEYBOARD)
+        return
+
+    active = REPOSITORY.get_active_session(staff["user_id"])
+    text = SERVICE.summary_text(staff["user_id"])
+    if active:
+        activity = ACTIVITIES[active["activity_key"]]
+        started_at = datetime.fromisoformat(active["started_at"])
+        text = f"{text}\n\nCurrent Activity: {activity.label}\nStarted: {format_local(started_at)}"
+    await update.message.reply_text(text, reply_markup=KEYBOARD)
+
+
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if not staff["is_admin"]:
+        await update.message.reply_text("Only admins can use /report.", reply_markup=KEYBOARD)
+        return
+    await update.message.reply_text(SERVICE.report_text(), reply_markup=KEYBOARD)
+
+
+async def active_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if not staff["is_admin"]:
+        await update.message.reply_text("Only admins can use /active.", reply_markup=KEYBOARD)
+        return
+    await update.message.reply_text(SERVICE.active_staff_text(), reply_markup=KEYBOARD)
+
+
+async def time_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if staff["is_admin"]:
+        await update.message.reply_text(monitoring_block_message(), reply_markup=KEYBOARD)
+        return
+    if staff["is_timed_in"]:
+        await update.message.reply_text("You are already timed in.", reply_markup=KEYBOARD)
+        return
+
+    now = utc_now()
+    REPOSITORY.set_time_in(staff["user_id"], update.effective_chat.id, now)
+    await update.message.reply_text(
+        f"{TIME_IN_LABEL} recorded at {format_local(now)}.",
+        reply_markup=KEYBOARD,
+    )
+    await send_supervisor_alert(
+        context,
+        f"{display_name(staff)} timed in at {format_local(now)}.",
+    )
+
+
+async def time_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if staff["is_admin"]:
+        await update.message.reply_text(monitoring_block_message(), reply_markup=KEYBOARD)
+        return
+    if not staff["is_timed_in"]:
+        await update.message.reply_text("You are not currently timed in.", reply_markup=KEYBOARD)
+        return
+
+    active = REPOSITORY.get_active_session(staff["user_id"])
+    now = utc_now()
+    if active:
+        REPOSITORY.end_activity(active["id"], now, "time_out")
+
+    REPOSITORY.set_time_out(staff["user_id"], update.effective_chat.id, now)
+    summary = SERVICE.summary_text(staff["user_id"])
+    await update.message.reply_text(
+        f"{TIME_OUT_LABEL} recorded at {format_local(now)}.\n\n{summary}",
+        reply_markup=KEYBOARD,
+    )
+    await send_supervisor_alert(
+        context,
+        f"{display_name(staff)} timed out at {format_local(now)}.\n\n{summary}",
+    )
+
+
+async def back_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if staff["is_admin"]:
+        await update.message.reply_text(monitoring_block_message(), reply_markup=KEYBOARD)
+        return
+
+    active = REPOSITORY.get_active_session(staff["user_id"])
+    if not active:
+        await update.message.reply_text("No active activity to stop.", reply_markup=KEYBOARD)
+        return
+
+    now = utc_now()
+    REPOSITORY.end_activity(active["id"], now, "manual_back")
+    activity = ACTIVITIES[active["activity_key"]]
+    duration_seconds = (now - datetime.fromisoformat(active["started_at"])).total_seconds()
+    text = (
+        f"{BACK_LABEL} {activity.label} ended.\n"
+        f"Used this session: {format_duration(duration_seconds)}\n\n"
+        f"{SERVICE.summary_text(staff['user_id'])}"
+    )
+    await update.message.reply_text(text, reply_markup=KEYBOARD)
+    await send_supervisor_alert(
+        context,
+        f"{display_name(staff)} ended {activity.label} after {format_duration(duration_seconds)}.",
+    )
+
+
+async def start_activity(update: Update, context: ContextTypes.DEFAULT_TYPE, activity_key: str) -> None:
+    staff = await ensure_registered(update, context)
+    if staff["is_admin"]:
+        await update.message.reply_text(monitoring_block_message(), reply_markup=KEYBOARD)
+        return
+    if not staff["is_timed_in"]:
+        await update.message.reply_text(
+            "You must Time In before starting an activity.",
+            reply_markup=KEYBOARD,
+        )
+        return
+
+    active = REPOSITORY.get_active_session(staff["user_id"])
+    if active:
+        current = ACTIVITIES[active["activity_key"]]
+        await update.message.reply_text(
+            f"{current.label} is still active. Press {BACK_LABEL} before starting a new activity.",
+            reply_markup=KEYBOARD,
+        )
+        return
+
+    activity = ACTIVITIES[activity_key]
+    allowed, message = SERVICE.can_start_activity(staff["user_id"], activity)
+    if not allowed:
+        await update.message.reply_text(message, reply_markup=KEYBOARD)
+        await send_supervisor_alert(
+            context,
+            f"{display_name(staff)} was blocked from starting {activity.label}. Reason: {message}",
+        )
+        return
+
+    now = utc_now()
+    REPOSITORY.start_activity(staff["user_id"], update.effective_chat.id, activity_key, now)
+    ends_at = now + timedelta(minutes=activity.limit_minutes)
+    await update.message.reply_text(
+        f"{activity.label} started.\n"
+        f"Allowed time: {activity.limit_minutes} mins\n"
+        f"Auto-end: {format_local(ends_at)}\n\n"
+        f"Press {BACK_LABEL} to end this activity early.",
+        reply_markup=KEYBOARD,
+    )
+    await send_supervisor_alert(
+        context,
+        f"{display_name(staff)} started {activity.label} at {format_local(now)}.",
+    )
+
+
+async def time_in_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await time_in(update, context)
+
+
+async def time_out_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await time_out(update, context)
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (update.message.text or "").strip()
+    action = LABEL_TO_ACTION.get(text)
+    if not action:
+        return
+
+    if action == "time_in":
+        await time_in(update, context)
+        return
+    if action == "time_out":
+        await time_out(update, context)
+        return
+    if action == "back":
+        await back_activity(update, context)
+        return
+    if action == "status":
+        await status_command(update, context)
+        return
+    await start_activity(update, context, action)
+
+
+async def auto_close_expired(context: ContextTypes.DEFAULT_TYPE) -> None:
+    expired = SERVICE.close_expired_sessions()
+    for item in expired:
+        session = item["session"]
+        staff = REPOSITORY.get_staff(session["user_id"])
+        if not staff:
+            continue
+
+        text = (
+            f"{ACTIVITIES[session['activity_key']].label} reached its "
+            f"{ACTIVITIES[session['activity_key']].limit_minutes}-minute limit and was ended automatically.\n\n"
+            f"{SERVICE.summary_text(session['user_id'])}"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=session["chat_id"],
+                text=text,
+                reply_markup=KEYBOARD,
+            )
+        except Exception:
+            LOGGER.exception("Failed to send auto-close message to chat %s", session["chat_id"])
+
+        await send_supervisor_alert(
+            context,
+            f"{display_name(staff)} reached the limit for {ACTIVITIES[session['activity_key']].label} at {format_local(item['ended_at'])}.",
+        )
+
+
+def build_application() -> Application:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is required.")
+
+    app = Application.builder().token(token).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("active", active_command))
+    app.add_handler(CommandHandler("timein", time_in_command))
+    app.add_handler(CommandHandler("timeout", time_out_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.job_queue.run_repeating(auto_close_expired, interval=AUTO_CLOSE_CHECK_SECONDS, first=5)
+    return app
+
+
+def main() -> None:
+    app = build_application()
+    LOGGER.info("Starting Telegram staff activity bot")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()

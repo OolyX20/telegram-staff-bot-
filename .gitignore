@@ -1,0 +1,4 @@
+cd "C:\Users\Ooly\Documents\Telegram Bot"
+git init
+git init
+git commit -m "Initial Telegram staff activity bot"
