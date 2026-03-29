@@ -19,6 +19,7 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 - Admin-only commands:
   - `/report` for all non-admin staff
   - `/active` for currently active staff
+  - `📥 Collect Data` or `/collect` for an immediate manual HTML report
 - Optional automatic alerts to a supervisor chat.
 
 ## Setup
