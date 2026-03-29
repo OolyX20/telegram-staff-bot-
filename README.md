@@ -21,7 +21,7 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 - The bot generates an HTML report every day at `1:00 AM` for the previous day and sends it only to owner/admin accounts.
 - Admin-only reports:
   - `📥 Collect Data` or `/collect`
-  - `📑 Cutoff Report` or `/cutoff YYYY-MM-DD YYYY-MM-DD`, with full per-staff chronological records for the selected period
+  - `📑 Cutoff Report` or `/cutoff YYYY-MM-DD YYYY-MM-DD`, with full per-staff chronological records for the selected period plus days worked, rest days, and absences
 
 ## Interface Separation
 

@@ -161,6 +161,10 @@ def local_date_string(reference: datetime) -> str:
     return reference.astimezone(LOCAL_TZ).strftime("%Y-%m-%d")
 
 
+def parse_local_date(value: str) -> datetime:
+    return datetime.fromisoformat(f"{value}T00:00:00").replace(tzinfo=LOCAL_TZ)
+
+
 def canonical_activity_key(activity_key: str) -> str:
     if activity_key in {"smoke", "cr"}:
         return "cr_smoke"
@@ -970,8 +974,16 @@ class ActivityService:
         report_path = REPORTS_DIR / f"{filename_prefix}-{start_date}-to-{end_date}.html"
         shift_rows = self.repository.get_shift_records_for_range(start_date, end_date)
         sections = []
+        start_local_date = parse_local_date(start_date)
+        end_local_date = parse_local_date(end_date)
+        total_cutoff_days = (end_local_date.date() - start_local_date.date()).days + 1
 
-        for staff in self.repository.get_staff_for_cutoff_range(start_date, end_date):
+        staff_rows = sorted(
+            (staff for staff in self.repository.get_all_staff() if not staff["is_admin"]),
+            key=lambda row: display_name(row).lower(),
+        )
+
+        for staff in staff_rows:
             if staff["is_admin"]:
                 continue
 
@@ -980,10 +992,15 @@ class ActivityService:
                 for row in shift_rows
                 if row["user_id"] == staff["user_id"]
             ]
-            if not staff_shift_rows:
-                continue
-
             staff_shift_rows.sort(key=lambda row: (row["work_date"], row["time_in_at"] or "", row["id"]))
+            worked_days = {row["work_date"] for row in staff_shift_rows}
+            rest_days = {
+                row["rest_day_effective_date"]
+                for row in staff_shift_rows
+                if row["rest_day_effective_date"]
+                and start_date <= row["rest_day_effective_date"] <= end_date
+            }
+            absence_days = max(0, total_cutoff_days - len(worked_days) - len(rest_days))
             record_rows = []
             for index, row in enumerate(staff_shift_rows, start=1):
                 time_in_at = parse_iso(row["time_in_at"])
@@ -1025,6 +1042,15 @@ class ActivityService:
                     """
                 )
 
+            if not record_rows:
+                record_rows.append(
+                    """
+                    <tr>
+                        <td colspan="9">No records found for this staff in the selected cutoff period.</td>
+                    </tr>
+                    """
+                )
+
             name = display_name(staff)
             sections.append(
                 f"""
@@ -1048,6 +1074,11 @@ class ActivityService:
                             {''.join(record_rows)}
                         </tbody>
                     </table>
+                    <div class="summary">
+                        <p><strong>Total Days Worked:</strong> {len(worked_days)}</p>
+                        <p><strong>Total Rest Days:</strong> {len(rest_days)}</p>
+                        <p><strong>Total Absences:</strong> {absence_days}</p>
+                    </div>
                 </section>
                 """
             )
@@ -1098,6 +1129,15 @@ class ActivityService:
         }}
         tr.exceeded {{
             background: #fee2e2;
+        }}
+        .summary {{
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            padding: 12px;
+            margin-bottom: 20px;
+        }}
+        .summary p {{
+            margin: 6px 0;
         }}
     </style>
 </head>
