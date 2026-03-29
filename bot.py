@@ -678,7 +678,7 @@ async def start_activity(update: Update, context: ContextTypes.DEFAULT_TYPE, act
     if active:
         current = ACTIVITIES[active["activity_key"]]
         await update.message.reply_text(
-            f"{current.label} is still active. Press {BACK_LABEL} before starting a new activity.",
+            f"{current.label} is still active.\nPress {BACK_LABEL} first before selecting a new activity.",
             reply_markup=KEYBOARD,
         )
         return
