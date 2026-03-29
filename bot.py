@@ -50,7 +50,7 @@ COLLECT_DATA_LABEL = "\U0001f4e5 Collect Data"
 BREAK_LABEL = "\u2615 Break"
 SMOKE_LABEL = "\U0001f6ac Smoke"
 CR_LABEL = "\U0001f6bb CR"
-PARCEL_LABEL = "\U0001f4e6 Parcel"
+REST_DAY_LABEL = "\U0001f4c5 Rest Day"
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,6 @@ ACTIVITIES: Dict[str, Activity] = {
     "break": Activity("break", BREAK_LABEL),
     "smoke": Activity("smoke", SMOKE_LABEL),
     "cr": Activity("cr", CR_LABEL),
-    "parcel": Activity("parcel", PARCEL_LABEL),
 }
 
 LABEL_TO_ACTION = {
@@ -72,6 +71,7 @@ LABEL_TO_ACTION = {
     BACK_LABEL: "back",
     STATUS_LABEL: "status",
     COLLECT_DATA_LABEL: "collect_data",
+    REST_DAY_LABEL: "rest_day",
 }
 LABEL_TO_ACTION.update({activity.label: activity.key for activity in ACTIVITIES.values()})
 
@@ -79,7 +79,7 @@ STAFF_KEYBOARD = ReplyKeyboardMarkup(
     [
         [TIME_IN_LABEL, TIME_OUT_LABEL],
         [BREAK_LABEL, SMOKE_LABEL],
-        [CR_LABEL, PARCEL_LABEL],
+        [CR_LABEL, REST_DAY_LABEL],
         [BACK_LABEL, STATUS_LABEL],
     ],
     resize_keyboard=True,
@@ -122,6 +122,10 @@ def format_local(timestamp: datetime) -> str:
 
 def format_local_date(timestamp: datetime) -> str:
     return timestamp.astimezone(LOCAL_TZ).strftime("%Y-%m-%d")
+
+
+def next_local_date_string(reference: datetime) -> str:
+    return (reference.astimezone(LOCAL_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def warning_text(remaining_seconds: float) -> Optional[str]:
@@ -180,7 +184,8 @@ class ActivityRepository:
                     is_timed_in INTEGER NOT NULL DEFAULT 0,
                     shift_start_at TEXT,
                     last_time_out_at TEXT,
-                    last_chat_id INTEGER
+                    last_chat_id INTEGER,
+                    rest_day_date TEXT
                 )
                 """
             )
@@ -199,6 +204,12 @@ class ActivityRepository:
                 """
             )
             self._migrate_legacy_schema(conn)
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(staff)").fetchall()
+            }
+            if "rest_day_date" not in columns:
+                conn.execute("ALTER TABLE staff ADD COLUMN rest_day_date TEXT")
 
     def _migrate_legacy_schema(self, conn: sqlite3.Connection) -> None:
         columns = {
@@ -217,7 +228,8 @@ class ActivityRepository:
                     is_timed_in INTEGER NOT NULL DEFAULT 0,
                     shift_start_at TEXT,
                     last_time_out_at TEXT,
-                    last_chat_id INTEGER
+                    last_chat_id INTEGER,
+                    rest_day_date TEXT
                 )
                 """
             )
@@ -310,10 +322,25 @@ class ActivityRepository:
             conn.execute(
                 """
                 UPDATE staff
-                SET is_timed_in = 0, shift_start_at = NULL, last_time_out_at = ?, last_chat_id = ?
+                SET is_timed_in = 0, shift_start_at = NULL, last_time_out_at = ?, last_chat_id = ?, rest_day_date = NULL
                 WHERE user_id = ?
                 """,
                 (at.isoformat(), chat_id, user_id),
+            )
+
+    def set_rest_day_and_time_out(self, user_id: int, chat_id: int, at: datetime, rest_day_date: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE staff
+                SET is_timed_in = 0,
+                    shift_start_at = NULL,
+                    last_time_out_at = ?,
+                    last_chat_id = ?,
+                    rest_day_date = ?
+                WHERE user_id = ?
+                """,
+                (at.isoformat(), chat_id, rest_day_date, user_id),
             )
 
     def get_active_session(self, user_id: int) -> Optional[sqlite3.Row]:
@@ -576,6 +603,12 @@ class ActivityService:
                 if summary["remaining"] >= 0
                 else f"EXCEEDED {format_minutes(abs(summary['remaining']))} mins"
             )
+            tomorrow_date = next_local_date_string(day_start)
+            next_day_status = (
+                "Rest Day"
+                if staff["rest_day_date"] == tomorrow_date
+                else "Scheduled"
+            )
             row_class = "exceeded" if summary["remaining"] < 0 else ""
             rows.append(
                 f"""
@@ -586,7 +619,7 @@ class ActivityService:
                     <td>{format_minutes(summary['usage']['break'])} mins</td>
                     <td>{format_minutes(summary['usage']['smoke'])} mins</td>
                     <td>{format_minutes(summary['usage']['cr'])} mins</td>
-                    <td>{format_minutes(summary['usage']['parcel'])} mins</td>
+                    <td>{escape(next_day_status)}</td>
                     <td>{format_minutes(summary['total_used'])} mins</td>
                     <td>{escape(balance_value)}</td>
                 </tr>
@@ -652,7 +685,7 @@ class ActivityService:
                 <th>Break</th>
                 <th>Smoke</th>
                 <th>CR</th>
-                <th>Parcel</th>
+                <th>Next Day</th>
                 <th>Total Used</th>
                 <th>Status</th>
             </tr>
@@ -747,7 +780,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         lines.extend(
             [
                 "",
-                "Use the keyboard to Time In, start an activity, stop it with Back, and Time Out for the summary.",
+                "Use the keyboard to Time In, start an activity, stop it with Back, and choose Time Out or Rest Day at the end of the shift.",
             ]
         )
     await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_staff(staff))
@@ -815,6 +848,43 @@ async def collect_data_command(update: Update, context: ContextTypes.DEFAULT_TYP
             "Collect Data failed. Start a private chat with the bot first, then try again.",
             reply_markup=keyboard_for_staff(staff),
         )
+
+
+async def rest_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if staff["is_admin"]:
+        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_staff(staff))
+        return
+    if not staff["is_timed_in"]:
+        await update.message.reply_text(
+            "You must Time In before selecting Rest Day.",
+            reply_markup=keyboard_for_staff(staff),
+        )
+        return
+
+    now = utc_now()
+    active = REPOSITORY.get_active_session(staff["user_id"])
+    if active:
+        REPOSITORY.end_activity(active["id"], now, "rest_day")
+
+    rest_day_date = next_local_date_string(now)
+    REPOSITORY.set_rest_day_and_time_out(
+        staff["user_id"],
+        update.effective_chat.id,
+        now,
+        rest_day_date,
+    )
+    summary = SERVICE.summary_text(staff["user_id"])
+    await update.message.reply_text(
+        f"{REST_DAY_LABEL} selected.\n"
+        f"You are marked as Rest Day for {rest_day_date}.\n"
+        f"{TIME_OUT_LABEL} recorded at {format_local(now)}.\n\n{summary}",
+        reply_markup=keyboard_for_staff(staff),
+    )
+    await send_supervisor_alert(
+        context,
+        f"{display_name(staff)} selected Rest Day for {rest_day_date} and timed out at {format_local(now)}.",
+    )
 
 
 async def time_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -962,6 +1032,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if action == "status":
         await status_command(update, context)
+        return
+    if action == "rest_day":
+        await rest_day(update, context)
         return
     if action == "collect_data":
         await collect_data_command(update, context)
