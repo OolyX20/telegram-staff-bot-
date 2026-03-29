@@ -243,6 +243,7 @@ def is_owner(staff: sqlite3.Row) -> bool:
 
 async def telegram_admin_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
     chat = update.effective_chat
+    user_id = update.effective_user.id
     if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
         return None
 
@@ -1050,7 +1051,7 @@ SERVICE = ActivityService(REPOSITORY)
 async def ensure_registered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> sqlite3.Row:
     staff = SERVICE.register_user(update)
     detected_role = await telegram_admin_role(update, context)
-    final_role = detected_role or ROLE_STAFF
+    final_role = detected_role or role_of(staff)
     if role_of(staff) != final_role:
         REPOSITORY.set_role(staff["user_id"], final_role)
         staff = REPOSITORY.get_staff(staff["user_id"])
