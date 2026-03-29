@@ -14,7 +14,7 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 ## Features
 
 - Each staff member can only `⏱️ Time In` once per day.
-- The only activities are `☕ Break`, `🚬 Smoke`, and `🚻 CR`.
+- The main dashboard buttons are `⏱️ Time In`, `🏁 Time Out`, `☕ Break`, `🚻 CR`, `📅 Rest Day`, `🔙 Back`, and `🛠 Admin Panel`.
 - `📅 Rest Day` is not an activity. It marks the staff member as off for tomorrow and also ends the current shift.
 - `🏁 Time Out` ends the active activity and means the staff member is still scheduled to work the next day.
 - Staff receive a button-by-button tutorial when they use `/start`.
@@ -27,6 +27,7 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 
 - Staff only see the Staff Dashboard.
 - Admins and owners use a separate Admin Panel.
+- The `🛠 Admin Panel` button opens `📊 Status`, `📥 Collect Data`, and `📑 Cutoff Report`.
 
 ## Admin Commands
 

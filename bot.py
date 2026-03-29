@@ -48,10 +48,8 @@ STATUS_LABEL = "\U0001f4ca Status"
 COLLECT_DATA_LABEL = "\U0001f4e5 Collect Data"
 CUTOFF_REPORT_LABEL = "\U0001f4d1 Cutoff Report"
 ADMIN_PANEL_LABEL = "\U0001f6e0 Admin Panel"
-STAFF_DASHBOARD_LABEL = "\U0001f465 Staff Dashboard"
-NAVIGATION_LABEL = "\U0001f9ed Navigation"
 BREAK_LABEL = "\u2615 Break"
-CR_SMOKE_LABEL = "\U0001f6bb/\U0001f6ac CR/Smoke"
+CR_LABEL = "\U0001f6bb CR"
 REST_DAY_LABEL = "\U0001f4c5 Rest Day"
 
 
@@ -63,7 +61,7 @@ class Activity:
 
 ACTIVITIES: Dict[str, Activity] = {
     "break": Activity("break", BREAK_LABEL),
-    "cr_smoke": Activity("cr_smoke", CR_SMOKE_LABEL),
+    "cr_smoke": Activity("cr_smoke", CR_LABEL),
 }
 
 LABEL_TO_ACTION = {
@@ -73,9 +71,7 @@ LABEL_TO_ACTION = {
     STATUS_LABEL: "status",
     COLLECT_DATA_LABEL: "collect_data",
     CUTOFF_REPORT_LABEL: "cutoff_report",
-    NAVIGATION_LABEL: "staff_dashboard",
     ADMIN_PANEL_LABEL: "admin_panel",
-    STAFF_DASHBOARD_LABEL: "staff_dashboard",
     REST_DAY_LABEL: "rest_day",
 }
 LABEL_TO_ACTION.update({activity.label: activity.key for activity in ACTIVITIES.values()})
@@ -83,9 +79,9 @@ LABEL_TO_ACTION.update({activity.label: activity.key for activity in ACTIVITIES.
 STAFF_KEYBOARD = ReplyKeyboardMarkup(
     [
         [TIME_IN_LABEL, TIME_OUT_LABEL],
-        [BREAK_LABEL, CR_SMOKE_LABEL],
-        [REST_DAY_LABEL],
-        [BACK_LABEL, STATUS_LABEL],
+        [BREAK_LABEL, CR_LABEL],
+        [REST_DAY_LABEL, BACK_LABEL],
+        [ADMIN_PANEL_LABEL],
     ],
     resize_keyboard=True,
 )
@@ -94,7 +90,6 @@ ADMIN_PANEL_KEYBOARD = ReplyKeyboardMarkup(
     [
         [STATUS_LABEL, COLLECT_DATA_LABEL],
         [CUTOFF_REPORT_LABEL],
-        [NAVIGATION_LABEL],
     ],
     resize_keyboard=True,
 )
@@ -103,7 +98,6 @@ OWNER_PANEL_KEYBOARD = ReplyKeyboardMarkup(
     [
         [STATUS_LABEL, COLLECT_DATA_LABEL],
         [CUTOFF_REPORT_LABEL],
-        [NAVIGATION_LABEL],
     ],
     resize_keyboard=True,
 )
@@ -111,9 +105,8 @@ OWNER_PANEL_KEYBOARD = ReplyKeyboardMarkup(
 ADMIN_STAFF_KEYBOARD = ReplyKeyboardMarkup(
     [
         [TIME_IN_LABEL, TIME_OUT_LABEL],
-        [BREAK_LABEL, CR_SMOKE_LABEL],
-        [REST_DAY_LABEL],
-        [BACK_LABEL, STATUS_LABEL],
+        [BREAK_LABEL, CR_LABEL],
+        [REST_DAY_LABEL, BACK_LABEL],
         [ADMIN_PANEL_LABEL],
     ],
     resize_keyboard=True,
@@ -122,9 +115,8 @@ ADMIN_STAFF_KEYBOARD = ReplyKeyboardMarkup(
 PRIVATE_STAFF_KEYBOARD = ReplyKeyboardMarkup(
     [
         [TIME_IN_LABEL, TIME_OUT_LABEL],
-        [BREAK_LABEL, CR_SMOKE_LABEL],
-        [REST_DAY_LABEL],
-        [BACK_LABEL, STATUS_LABEL],
+        [BREAK_LABEL, CR_LABEL],
+        [REST_DAY_LABEL, BACK_LABEL],
         [ADMIN_PANEL_LABEL],
     ],
     resize_keyboard=True,
@@ -943,7 +935,7 @@ class ActivityService:
                 <th>Time In</th>
                 <th>Time Out</th>
                 <th>Break</th>
-                <th>CR/Smoke</th>
+                <th>CR</th>
                 <th>Total Used</th>
                 <th>Remarks</th>
             </tr>
@@ -1114,12 +1106,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         lines = [
             "Admin panel is ready." if role == ROLE_ADMIN else "Owner panel is ready.",
             "",
-            "Admin controls are separated from the staff dashboard.",
+            "Admin controls are opened from the Admin Panel button.",
             "Button guide:",
             f"{STATUS_LABEL} - Show the current live admin summary.",
             f"{COLLECT_DATA_LABEL} - Generate and send the daily HTML report to your private chat.",
             f"{CUTOFF_REPORT_LABEL} - Generate the cutoff summary report for the selected period.",
-            f"{NAVIGATION_LABEL} - Open the staff dashboard view.",
         ]
         await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff, "admin", chat_type))
     else:
@@ -1131,10 +1122,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"{TIME_IN_LABEL} - Start your shift. You can only use this once per day.",
             f"{TIME_OUT_LABEL} - End your shift. This means you are still scheduled to work tomorrow.",
             f"{BREAK_LABEL} - Start your break activity.",
-            f"{CR_SMOKE_LABEL} - Start your combined CR/Smoke activity.",
+            f"{CR_LABEL} - Start your CR and smoke activity.",
             f"{REST_DAY_LABEL} - Mark that your day off is tomorrow and end your shift.",
             f"{BACK_LABEL} - Stop the current activity and send your activity summary.",
-            f"{STATUS_LABEL} - Show your current daily activity summary.",
+            f"{ADMIN_PANEL_LABEL} - Open admin actions if your account is admin or owner.",
             "",
             "Activities keep running until you press Back.",
             "Only one activity can be active at a time.",
