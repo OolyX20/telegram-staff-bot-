@@ -910,53 +910,71 @@ class ActivityService:
         body {{
             font-family: Arial, sans-serif;
             margin: 24px;
-            color: #1f2937;
-            background: #f8fafc;
+            color: #e6ebf5;
+            background: #17212b;
         }}
         h1 {{
             margin-bottom: 8px;
+            color: #ffffff;
         }}
         p {{
             margin-top: 0;
-            color: #475569;
+            color: #9db2c8;
+        }}
+        .card {{
+            background: #1f2c3a;
+            border: 1px solid #2b5278;
+            border-radius: 14px;
+            padding: 16px;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.25);
         }}
         table {{
             width: 100%;
             border-collapse: collapse;
-            background: #ffffff;
+            background: transparent;
+            overflow: hidden;
         }}
         th, td {{
-            border: 1px solid #cbd5e1;
+            border: 1px solid #2b3f53;
             padding: 10px;
             text-align: left;
         }}
         th {{
-            background: #e2e8f0;
+            background: #223244;
+            color: #d9e7f7;
+        }}
+        td {{
+            background: #1f2c3a;
         }}
         tr.exceeded {{
-            background: #fee2e2;
+            background: #4a242d;
+        }}
+        tr.exceeded td {{
+            background: #4a242d;
         }}
     </style>
 </head>
 <body>
     <h1>Staff Activity Report</h1>
     <p>Report date: {report_date}</p>
-    <table>
-        <thead>
-            <tr>
-                <th>Staff</th>
-                <th>Time In</th>
-                <th>Time Out</th>
-                <th>Break</th>
-                <th>CR</th>
-                <th>Total Used</th>
-                <th>Remarks</th>
-            </tr>
-        </thead>
-        <tbody>
-            {''.join(rows)}
-        </tbody>
-    </table>
+    <div class="card">
+        <table>
+            <thead>
+                <tr>
+                    <th>Staff</th>
+                    <th>Time In</th>
+                    <th>Time Out</th>
+                    <th>Break</th>
+                    <th>CR</th>
+                    <th>Total Used</th>
+                    <th>Remarks</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(rows)}
+            </tbody>
+        </table>
+    </div>
 </body>
 </html>
 """
@@ -1102,42 +1120,64 @@ class ActivityService:
         body {{
             font-family: Arial, sans-serif;
             margin: 24px;
-            color: #1f2937;
-            background: #f8fafc;
+            color: #e6ebf5;
+            background: #17212b;
         }}
         h1 {{
             margin-bottom: 8px;
+            color: #ffffff;
         }}
         h2 {{
             margin-top: 24px;
-            border-bottom: 1px solid #cbd5e1;
+            color: #ffffff;
+            border-bottom: 1px solid #2b5278;
             padding-bottom: 4px;
+        }}
+        p {{
+            color: #9db2c8;
+        }}
+        section {{
+            background: #1f2c3a;
+            border: 1px solid #2b5278;
+            border-radius: 14px;
+            padding: 16px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.25);
         }}
         table {{
             width: 100%;
-            background: #ffffff;
+            background: transparent;
             border-collapse: collapse;
             margin-bottom: 20px;
         }}
         th, td {{
-            border: 1px solid #cbd5e1;
+            border: 1px solid #2b3f53;
             padding: 10px;
             text-align: left;
         }}
         th {{
-            background: #e2e8f0;
+            background: #223244;
+            color: #d9e7f7;
+        }}
+        td {{
+            background: #1f2c3a;
         }}
         tr.exceeded {{
-            background: #fee2e2;
+            background: #4a242d;
+        }}
+        tr.exceeded td {{
+            background: #4a242d;
         }}
         .summary {{
-            background: #ffffff;
-            border: 1px solid #cbd5e1;
+            background: #223244;
+            border: 1px solid #2b5278;
+            border-radius: 12px;
             padding: 12px;
-            margin-bottom: 20px;
+            margin-bottom: 4px;
         }}
         .summary p {{
             margin: 6px 0;
+            color: #d9e7f7;
         }}
     </style>
 </head>
