@@ -968,8 +968,8 @@ class ActivityService:
     ) -> Path:
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         report_path = REPORTS_DIR / f"{filename_prefix}-{start_date}-to-{end_date}.html"
-        grouped: Dict[str, list[str]] = {}
         shift_rows = self.repository.get_shift_records_for_range(start_date, end_date)
+        sections = []
 
         for staff in self.repository.get_staff_for_cutoff_range(start_date, end_date):
             if staff["is_admin"]:
@@ -980,30 +980,74 @@ class ActivityService:
                 for row in shift_rows
                 if row["user_id"] == staff["user_id"]
             ]
-            days_worked = len({row["work_date"] for row in staff_shift_rows})
-            rest_days = len(
-                {
-                    row["rest_day_effective_date"]
-                    for row in staff_shift_rows
-                    if row["rest_day_effective_date"]
-                    and start_date <= row["rest_day_effective_date"] <= end_date
-                }
-            )
-            late_minutes = sum(int(row["late_minutes"] or 0) for row in staff_shift_rows)
-            name = display_name(staff)
-            letter = name[0].upper() if name and name[0].isalpha() else "#"
-            grouped.setdefault(letter, []).append(
-                f"{escape(name)}  Days Worked: {days_worked} / Rest Days: {rest_days} / Late: {late_minutes} minutes"
-            )
+            if not staff_shift_rows:
+                continue
 
-        sections = []
-        for letter in sorted(grouped):
-            items = "".join(f"<li>{line}</li>" for line in grouped[letter])
+            staff_shift_rows.sort(key=lambda row: (row["work_date"], row["time_in_at"] or "", row["id"]))
+            record_rows = []
+            for index, row in enumerate(staff_shift_rows, start=1):
+                time_in_at = parse_iso(row["time_in_at"])
+                time_out_at = parse_iso(row["time_out_at"])
+                if time_in_at:
+                    summary = self.day_summary(row["user_id"], time_in_at)
+                else:
+                    local_reference = datetime.fromisoformat(f"{row['work_date']}T00:00:00").replace(tzinfo=LOCAL_TZ)
+                    summary = self.day_summary(row["user_id"], local_reference.astimezone(UTC))
+
+                remarks = []
+                if row["next_day_status"] == "Rest Day":
+                    remarks.append("Rest Day")
+                if summary["remaining"] < 0:
+                    remarks.append(f"Exceeded by {format_minutes(abs(summary['remaining']))} mins")
+                remarks_value = ", ".join(remarks) if remarks else "-"
+                row_class = "exceeded" if summary["remaining"] < 0 else ""
+                username_value = username_label(row)
+                staff_name_value = display_name(row)
+                total_exceed = (
+                    f"{format_minutes(abs(summary['remaining']))} mins"
+                    if summary["remaining"] < 0
+                    else "0 mins"
+                )
+
+                record_rows.append(
+                    f"""
+                    <tr class="{row_class}">
+                        <td>{index}</td>
+                        <td>{escape(username_value)}</td>
+                        <td>{escape(row["work_date"])}</td>
+                        <td>{escape(staff_name_value)}</td>
+                        <td>{escape(format_local(time_in_at) if time_in_at else "N/A")}</td>
+                        <td>{escape(format_local(time_out_at) if time_out_at else "NOT TIMED OUT")}</td>
+                        <td>{format_minutes(summary['total_used'])} mins</td>
+                        <td>{escape(total_exceed)}</td>
+                        <td>{escape(remarks_value)}</td>
+                    </tr>
+                    """
+                )
+
+            name = display_name(staff)
             sections.append(
                 f"""
                 <section>
-                    <h2>{letter}</h2>
-                    <ul>{items}</ul>
+                    <h2>{escape(name)} Cutoff Report</h2>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>User Name</th>
+                                <th>Date</th>
+                                <th>Staff Name</th>
+                                <th>Time In</th>
+                                <th>Time Out</th>
+                                <th>Total Breaks</th>
+                                <th>Total Exceed</th>
+                                <th>Remarks</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {''.join(record_rows)}
+                        </tbody>
+                    </table>
                 </section>
                 """
             )
@@ -1038,15 +1082,22 @@ class ActivityService:
             border-bottom: 1px solid #cbd5e1;
             padding-bottom: 4px;
         }}
-        ul {{
-            list-style: none;
-            padding-left: 0;
-        }}
-        li {{
+        table {{
+            width: 100%;
             background: #ffffff;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }}
+        th, td {{
             border: 1px solid #cbd5e1;
-            padding: 12px;
-            margin-bottom: 10px;
+            padding: 10px;
+            text-align: left;
+        }}
+        th {{
+            background: #e2e8f0;
+        }}
+        tr.exceeded {{
+            background: #fee2e2;
         }}
     </style>
 </head>
