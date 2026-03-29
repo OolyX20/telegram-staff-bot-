@@ -9,9 +9,10 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
   - `admin`
   - `staff`
   - `blocked`
-- New users are blocked by default unless:
-  - their Telegram ID matches `OWNER_ID`
-  - or they are pre-seeded in `ADMIN_IDS`
+- In the group:
+  - Telegram `owner` is auto-detected as `owner`
+  - Telegram `admin` is auto-detected as `admin`
+  - normal group members are auto-detected as `staff`
 - Only the `owner` can manage security and change roles.
 - Admins can use reports, but cannot approve users or change access.
 - Staff can only use staff activity functions.

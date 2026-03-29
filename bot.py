@@ -252,6 +252,8 @@ async def telegram_admin_role(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ROLE_OWNER
     if member.status == ChatMemberStatus.ADMINISTRATOR:
         return ROLE_ADMIN
+    if member.status in {ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED}:
+        return ROLE_STAFF
     return None
 
 
