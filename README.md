@@ -16,23 +16,43 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 - `🏁 Time Out` ends the active activity and means the staff member is still scheduled to work the next day.
 - The bot sends a reminder every 30 seconds only after staff exceed the 60-minute daily limit and still have not pressed `🔙 Back`.
 - If staff go beyond 60 minutes total for the day, the summary highlights the exceeded time.
-- The bot generates an HTML report every day at `1:00 AM` for the previous day, saves it on the server, and sends it only to admin accounts. The report includes `Break`, `Smoke`, `CR`, `Total Used`, and a `Remarks` column for `Rest Day` and exceeded-time notes.
-- Admin-only tools:
-  - `📥 Collect Data` or `/collect` for an immediate manual HTML report
-  - `📑 Cutoff Report` or `/cutoff [start-date] [end-date]` for an alphabetized cutoff summary
-- Admins are auto-detected and are not monitored as staff.
-- Optional automatic alerts to a supervisor chat.
+- The bot generates an HTML report every day at `1:00 AM` for the previous day, saves it on the server, and sends it only to admin accounts.
 
-## Cutoff Report
+## Interface Separation
 
-- The `📑 Cutoff Report` button uses the current month-to-date by default.
-- The `/cutoff YYYY-MM-DD YYYY-MM-DD` command can be used for a custom date range.
-- Staff names are grouped alphabetically.
-- Each line shows:
-  - `Days Worked`
-  - `Rest Days`
-  - `Late` minutes
-- Late minutes are calculated from `SHIFT_START_TIME`.
+- Staff only see the Staff Dashboard buttons:
+  - `⏱️ Time In`
+  - `🏁 Time Out`
+  - `☕ Break`
+  - `🚬 Smoke`
+  - `🚻 CR`
+  - `📅 Rest Day`
+  - `🔙 Back`
+  - `📊 Status`
+- Admins and owners have a separate Admin Panel.
+- Admin Panel buttons are not shown to staff.
+- Admin Panel contains:
+  - `📥 Collect Data`
+  - `📑 Cutoff Report`
+  - `/report`
+  - `/active`
+- Admins can switch between:
+  - `🛠 Admin Panel`
+  - `👥 Staff Dashboard`
+
+## Reports
+
+- Daily HTML report:
+  - Runs automatically every day at `1:00 AM`
+  - Includes `Break`, `Smoke`, `CR`, `Total Used`, and `Remarks`
+  - Sent only to `ADMIN_IDS`
+- Manual HTML report:
+  - `📥 Collect Data` or `/collect`
+- Cutoff report:
+  - `📑 Cutoff Report` or `/cutoff YYYY-MM-DD YYYY-MM-DD`
+  - Groups staff alphabetically
+  - Shows `Days Worked`, `Rest Days`, and `Late` minutes
+  - Uses the current month-to-date by default when the button is pressed
 
 ## Setup
 
@@ -73,6 +93,8 @@ SUPERVISOR_CHAT_ID=-1001234567890
 - `/active`
 - `/collect`
 - `/cutoff YYYY-MM-DD YYYY-MM-DD`
+- `/adminpanel`
+- `/staffdashboard`
 - `/timein`
 - `/timeout`
 
@@ -84,4 +106,4 @@ SUPERVISOR_CHAT_ID=-1001234567890
 - `REPORTS_DIR` is optional. It controls where HTML reports are saved on the server.
 - `SHIFT_START_TIME` is optional. It is used to calculate late minutes in cutoff reports. Default is `09:00`.
 - The bot stores data locally in `staff_activity.db`.
-- Cutoff reports are accurate for shift records created after this feature was added.
+- Cutoff reports are accurate for shift records created after the cutoff-report feature was added.

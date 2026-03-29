@@ -49,6 +49,8 @@ BACK_LABEL = "\U0001f519 Back"
 STATUS_LABEL = "\U0001f4ca Status"
 COLLECT_DATA_LABEL = "\U0001f4e5 Collect Data"
 CUTOFF_REPORT_LABEL = "\U0001f4d1 Cutoff Report"
+ADMIN_PANEL_LABEL = "\U0001f6e0 Admin Panel"
+STAFF_DASHBOARD_LABEL = "\U0001f465 Staff Dashboard"
 BREAK_LABEL = "\u2615 Break"
 SMOKE_LABEL = "\U0001f6ac Smoke"
 CR_LABEL = "\U0001f6bb CR"
@@ -74,6 +76,8 @@ LABEL_TO_ACTION = {
     STATUS_LABEL: "status",
     COLLECT_DATA_LABEL: "collect_data",
     CUTOFF_REPORT_LABEL: "cutoff_report",
+    ADMIN_PANEL_LABEL: "admin_panel",
+    STAFF_DASHBOARD_LABEL: "staff_dashboard",
     REST_DAY_LABEL: "rest_day",
 }
 LABEL_TO_ACTION.update({activity.label: activity.key for activity in ACTIVITIES.values()})
@@ -88,11 +92,23 @@ STAFF_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-ADMIN_KEYBOARD = ReplyKeyboardMarkup(
+ADMIN_PANEL_KEYBOARD = ReplyKeyboardMarkup(
     [
         [STATUS_LABEL, COLLECT_DATA_LABEL],
         [CUTOFF_REPORT_LABEL],
         ["/report", "/active"],
+        [STAFF_DASHBOARD_LABEL],
+    ],
+    resize_keyboard=True,
+)
+
+ADMIN_STAFF_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [TIME_IN_LABEL, TIME_OUT_LABEL],
+        [BREAK_LABEL, SMOKE_LABEL],
+        [CR_LABEL, REST_DAY_LABEL],
+        [BACK_LABEL, STATUS_LABEL],
+        [ADMIN_PANEL_LABEL],
     ],
     resize_keyboard=True,
 )
@@ -184,8 +200,12 @@ def balance_label(remaining_seconds: float) -> str:
     return f"EXCEEDED {format_minutes(abs(remaining_seconds))} mins"
 
 
-def keyboard_for_staff(staff: sqlite3.Row) -> ReplyKeyboardMarkup:
-    return ADMIN_KEYBOARD if staff["is_admin"] else STAFF_KEYBOARD
+def keyboard_for_role(staff: sqlite3.Row, panel: str = "staff") -> ReplyKeyboardMarkup:
+    if not staff["is_admin"]:
+        return STAFF_KEYBOARD
+    if panel == "admin":
+        return ADMIN_PANEL_KEYBOARD
+    return ADMIN_STAFF_KEYBOARD
 
 
 class ActivityRepository:
@@ -966,36 +986,53 @@ async def send_html_report_document(
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    lines = [
-        "Staff activity monitor is ready.",
-        "",
-        f"Daily total activity allowance: {DAILY_LIMIT_MINUTES} minutes",
-        "Activities keep running until staff press Back.",
-        "The bot sends a reminder every 30 seconds if an activity is still running.",
-    ]
     if staff["is_admin"]:
-        lines.extend(
-            [
-                "",
-                "Admin mode detected.",
-                "Use /report for all staff, /active for ongoing activities, or /status for the team summary.",
-            ]
-        )
+        lines = [
+            "Admin panel is ready.",
+            "",
+            "Admin controls are separated from the staff dashboard.",
+            f"Press {STAFF_DASHBOARD_LABEL} to open the staff dashboard.",
+            f"Press {COLLECT_DATA_LABEL} or {CUTOFF_REPORT_LABEL} for reports.",
+        ]
+        await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff, "admin"))
     else:
-        lines.extend(
-            [
-                "",
-                "Use the keyboard to Time In, start an activity, stop it with Back, and choose Time Out or Rest Day at the end of the shift.",
-            ]
-        )
-    await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_staff(staff))
+        lines = [
+            "Staff activity monitor is ready.",
+            "",
+            f"Daily total activity allowance: {DAILY_LIMIT_MINUTES} minutes",
+            "Activities keep running until staff press Back.",
+            "Use the keyboard to Time In, start an activity, stop it with Back, and choose Time Out or Rest Day at the end of the shift.",
+        ]
+        await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff))
+
+
+async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if not staff["is_admin"]:
+        await update.message.reply_text("Only admins can access the Admin Panel.", reply_markup=keyboard_for_role(staff))
+        return
+    await update.message.reply_text(
+        "Admin controls are separate from the staff dashboard.\nChoose an admin action below.",
+        reply_markup=keyboard_for_role(staff, "admin"),
+    )
+
+
+async def staff_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if not staff["is_admin"]:
+        await update.message.reply_text("You are already in the staff dashboard.", reply_markup=keyboard_for_role(staff))
+        return
+    await update.message.reply_text(
+        "Staff dashboard opened.\nAdmin controls are hidden until you return to the Admin Panel.",
+        reply_markup=keyboard_for_role(staff, "staff"),
+    )
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
     if staff["is_admin"]:
         text = f"{SERVICE.active_staff_text()}\n\n{SERVICE.report_text()}"
-        await update.message.reply_text(text, reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text(text, reply_markup=keyboard_for_role(staff, "admin"))
         return
 
     active = REPOSITORY.get_active_session(staff["user_id"])
@@ -1009,29 +1046,29 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Started: {format_local(started_at)}\n"
             f"Running Time: {format_duration(running_seconds)}"
         )
-    await update.message.reply_text(text, reply_markup=keyboard_for_staff(staff))
+    await update.message.reply_text(text, reply_markup=keyboard_for_role(staff))
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
     if not staff["is_admin"]:
-        await update.message.reply_text("Only admins can use /report.", reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text("Only admins can use /report.", reply_markup=keyboard_for_role(staff))
         return
-    await update.message.reply_text(SERVICE.report_text(), reply_markup=keyboard_for_staff(staff))
+    await update.message.reply_text(SERVICE.report_text(), reply_markup=keyboard_for_role(staff, "admin"))
 
 
 async def active_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
     if not staff["is_admin"]:
-        await update.message.reply_text("Only admins can use /active.", reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text("Only admins can use /active.", reply_markup=keyboard_for_role(staff))
         return
-    await update.message.reply_text(SERVICE.active_staff_text(), reply_markup=keyboard_for_staff(staff))
+    await update.message.reply_text(SERVICE.active_staff_text(), reply_markup=keyboard_for_role(staff, "admin"))
 
 
 async def collect_data_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
     if not staff["is_admin"]:
-        await update.message.reply_text("Only admins can use Collect Data.", reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text("Only admins can use Collect Data.", reply_markup=keyboard_for_role(staff))
         return
 
     report_path = SERVICE.build_daily_html_report(utc_now(), filename_prefix="staff-report-manual")
@@ -1045,20 +1082,20 @@ async def collect_data_command(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         await update.message.reply_text(
             "Collect Data completed. The HTML report was sent privately to your admin account.",
-            reply_markup=keyboard_for_staff(staff),
+            reply_markup=keyboard_for_role(staff, "admin"),
         )
     except Exception:
         LOGGER.exception("Failed to send manual HTML report to admin %s", staff["user_id"])
         await update.message.reply_text(
             "Collect Data failed. Start a private chat with the bot first, then try again.",
-            reply_markup=keyboard_for_staff(staff),
+            reply_markup=keyboard_for_role(staff, "admin"),
         )
 
 
 async def cutoff_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
     if not staff["is_admin"]:
-        await update.message.reply_text("Only admins can use Cutoff Report.", reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text("Only admins can use Cutoff Report.", reply_markup=keyboard_for_role(staff))
         return
 
     args = getattr(context, "args", []) or []
@@ -1079,25 +1116,25 @@ async def cutoff_report_command(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await update.message.reply_text(
             f"Cutoff Report completed for {start_date} to {end_date}. The HTML file was sent privately to your admin account.",
-            reply_markup=keyboard_for_staff(staff),
+            reply_markup=keyboard_for_role(staff, "admin"),
         )
     except Exception:
         LOGGER.exception("Failed to send cutoff report to admin %s", staff["user_id"])
         await update.message.reply_text(
             "Cutoff Report failed. Start a private chat with the bot first, then try again.",
-            reply_markup=keyboard_for_staff(staff),
+            reply_markup=keyboard_for_role(staff, "admin"),
         )
 
 
 async def rest_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
     if staff["is_admin"]:
-        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_role(staff, "staff"))
         return
     if not staff["is_timed_in"]:
         await update.message.reply_text(
             "You must Time In before selecting Rest Day.",
-            reply_markup=keyboard_for_staff(staff),
+            reply_markup=keyboard_for_role(staff),
         )
         return
 
@@ -1118,7 +1155,7 @@ async def rest_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{REST_DAY_LABEL} selected.\n"
         f"You are marked as Rest Day for {rest_day_date}.\n"
         f"{TIME_OUT_LABEL} recorded at {format_local(now)}.\n\n{summary}",
-        reply_markup=keyboard_for_staff(staff),
+        reply_markup=keyboard_for_role(staff),
     )
     await send_supervisor_alert(
         context,
@@ -1129,15 +1166,15 @@ async def rest_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def time_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
     if staff["is_admin"]:
-        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_role(staff, "staff"))
         return
     if staff["is_timed_in"]:
-        await update.message.reply_text("You are already timed in.", reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text("You are already timed in.", reply_markup=keyboard_for_role(staff))
         return
     if SERVICE.has_timed_in_today(staff):
         await update.message.reply_text(
             "You already used your one Time In for today.\nPlease wait until the next day before timing in again.",
-            reply_markup=keyboard_for_staff(staff),
+            reply_markup=keyboard_for_role(staff),
         )
         return
 
@@ -1145,7 +1182,7 @@ async def time_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     REPOSITORY.set_time_in(staff["user_id"], update.effective_chat.id, now)
     await update.message.reply_text(
         f"{TIME_IN_LABEL} recorded at {format_local(now)}.",
-        reply_markup=keyboard_for_staff(staff),
+        reply_markup=keyboard_for_role(staff),
     )
     await send_supervisor_alert(
         context,
@@ -1156,10 +1193,10 @@ async def time_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def time_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
     if staff["is_admin"]:
-        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_role(staff, "staff"))
         return
     if not staff["is_timed_in"]:
-        await update.message.reply_text("You are not currently timed in.", reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text("You are not currently timed in.", reply_markup=keyboard_for_role(staff))
         return
 
     active = REPOSITORY.get_active_session(staff["user_id"])
@@ -1171,7 +1208,7 @@ async def time_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     summary = SERVICE.summary_text(staff["user_id"])
     await update.message.reply_text(
         f"{TIME_OUT_LABEL} recorded at {format_local(now)}.\n\n{summary}",
-        reply_markup=keyboard_for_staff(staff),
+        reply_markup=keyboard_for_role(staff),
     )
     await send_supervisor_alert(
         context,
@@ -1182,12 +1219,12 @@ async def time_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def back_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
     if staff["is_admin"]:
-        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_role(staff, "staff"))
         return
 
     active = REPOSITORY.get_active_session(staff["user_id"])
     if not active:
-        await update.message.reply_text("No active activity to stop.", reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text("No active activity to stop.", reply_markup=keyboard_for_role(staff))
         return
 
     now = utc_now()
@@ -1200,7 +1237,7 @@ async def back_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Used this session: {format_duration(duration_seconds)}\n\n"
         f"{SERVICE.summary_text(staff['user_id'])}"
     )
-    await update.message.reply_text(text, reply_markup=keyboard_for_staff(staff))
+    await update.message.reply_text(text, reply_markup=keyboard_for_role(staff))
     await send_supervisor_alert(
         context,
         f"{display_name(staff)} ended {activity.label} after {format_duration(duration_seconds)}.",
@@ -1210,12 +1247,12 @@ async def back_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def start_activity(update: Update, context: ContextTypes.DEFAULT_TYPE, activity_key: str) -> None:
     staff = await ensure_registered(update, context)
     if staff["is_admin"]:
-        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_staff(staff))
+        await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_role(staff, "staff"))
         return
     if not staff["is_timed_in"]:
         await update.message.reply_text(
             "You must Time In before starting an activity.",
-            reply_markup=keyboard_for_staff(staff),
+            reply_markup=keyboard_for_role(staff),
         )
         return
 
@@ -1224,7 +1261,7 @@ async def start_activity(update: Update, context: ContextTypes.DEFAULT_TYPE, act
         current = ACTIVITIES[active["activity_key"]]
         await update.message.reply_text(
             f"{current.label} is still active.\nPress {BACK_LABEL} first before selecting a new activity.",
-            reply_markup=keyboard_for_staff(staff),
+            reply_markup=keyboard_for_role(staff),
         )
         return
 
@@ -1238,7 +1275,7 @@ async def start_activity(update: Update, context: ContextTypes.DEFAULT_TYPE, act
         f"{activity.label} started.\n"
         f"Started: {format_local(now)}\n"
         f"Status: Running until you press {BACK_LABEL}.{warning_block}",
-        reply_markup=keyboard_for_staff(staff),
+        reply_markup=keyboard_for_role(staff),
     )
     await send_supervisor_alert(
         context,
@@ -1271,6 +1308,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if action == "status":
         await status_command(update, context)
+        return
+    if action == "admin_panel":
+        await admin_panel_command(update, context)
+        return
+    if action == "staff_dashboard":
+        await staff_dashboard_command(update, context)
         return
     if action == "rest_day":
         await rest_day(update, context)
@@ -1347,6 +1390,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("active", active_command))
     app.add_handler(CommandHandler("collect", collect_data_command))
     app.add_handler(CommandHandler("cutoff", cutoff_report_command))
+    app.add_handler(CommandHandler("adminpanel", admin_panel_command))
+    app.add_handler(CommandHandler("staffdashboard", staff_dashboard_command))
     app.add_handler(CommandHandler("timein", time_in_command))
     app.add_handler(CommandHandler("timeout", time_out_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
