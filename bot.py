@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import ReplyKeyboardMarkup, Update
-from telegram.constants import ChatMemberStatus, ChatType
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -37,11 +36,17 @@ AUTO_CLOSE_CHECK_SECONDS = int(os.getenv("AUTO_CLOSE_CHECK_SECONDS", "30"))
 SUPERVISOR_CHAT_ID = os.getenv("SUPERVISOR_CHAT_ID", "").strip()
 REPORTS_DIR = Path(os.getenv("REPORTS_DIR", "reports"))
 SHIFT_START_TIME = os.getenv("SHIFT_START_TIME", "09:00")
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 ADMIN_IDS: Set[int] = {
     int(value.strip())
     for value in os.getenv("ADMIN_IDS", "").split(",")
     if value.strip()
 }
+
+ROLE_OWNER = "owner"
+ROLE_ADMIN = "admin"
+ROLE_STAFF = "staff"
+ROLE_BLOCKED = "blocked"
 
 TIME_IN_LABEL = "\u23f1\ufe0f Time In"
 TIME_OUT_LABEL = "\U0001f3c1 Time Out"
@@ -51,6 +56,7 @@ COLLECT_DATA_LABEL = "\U0001f4e5 Collect Data"
 CUTOFF_REPORT_LABEL = "\U0001f4d1 Cutoff Report"
 ADMIN_PANEL_LABEL = "\U0001f6e0 Admin Panel"
 STAFF_DASHBOARD_LABEL = "\U0001f465 Staff Dashboard"
+SECURITY_PANEL_LABEL = "\U0001f512 Security"
 BREAK_LABEL = "\u2615 Break"
 SMOKE_LABEL = "\U0001f6ac Smoke"
 CR_LABEL = "\U0001f6bb CR"
@@ -78,6 +84,7 @@ LABEL_TO_ACTION = {
     CUTOFF_REPORT_LABEL: "cutoff_report",
     ADMIN_PANEL_LABEL: "admin_panel",
     STAFF_DASHBOARD_LABEL: "staff_dashboard",
+    SECURITY_PANEL_LABEL: "security_panel",
     REST_DAY_LABEL: "rest_day",
 }
 LABEL_TO_ACTION.update({activity.label: activity.key for activity in ACTIVITIES.values()})
@@ -97,6 +104,16 @@ ADMIN_PANEL_KEYBOARD = ReplyKeyboardMarkup(
         [STATUS_LABEL, COLLECT_DATA_LABEL],
         [CUTOFF_REPORT_LABEL],
         ["/report", "/active"],
+        [STAFF_DASHBOARD_LABEL],
+    ],
+    resize_keyboard=True,
+)
+
+OWNER_PANEL_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [STATUS_LABEL, COLLECT_DATA_LABEL],
+        [CUTOFF_REPORT_LABEL, SECURITY_PANEL_LABEL],
+        ["/report", "/active", "/users"],
         [STAFF_DASHBOARD_LABEL],
     ],
     resize_keyboard=True,
@@ -200,11 +217,29 @@ def balance_label(remaining_seconds: float) -> str:
     return f"EXCEEDED {format_minutes(abs(remaining_seconds))} mins"
 
 
+def role_of(staff: sqlite3.Row) -> str:
+    role = staff["role"] if "role" in staff.keys() else None
+    if role:
+        return role
+    return ROLE_ADMIN if staff["is_admin"] else ROLE_BLOCKED
+
+
+def has_admin_access(staff: sqlite3.Row) -> bool:
+    return role_of(staff) in {ROLE_OWNER, ROLE_ADMIN}
+
+
+def is_owner(staff: sqlite3.Row) -> bool:
+    return role_of(staff) == ROLE_OWNER
+
+
 def keyboard_for_role(staff: sqlite3.Row, panel: str = "staff") -> ReplyKeyboardMarkup:
-    if not staff["is_admin"]:
+    role = role_of(staff)
+    if role == ROLE_BLOCKED:
+        return ReplyKeyboardMarkup([["/start"]], resize_keyboard=True)
+    if role == ROLE_STAFF:
         return STAFF_KEYBOARD
     if panel == "admin":
-        return ADMIN_PANEL_KEYBOARD
+        return OWNER_PANEL_KEYBOARD if role == ROLE_OWNER else ADMIN_PANEL_KEYBOARD
     return ADMIN_STAFF_KEYBOARD
 
 
@@ -231,6 +266,7 @@ class ActivityRepository:
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     full_name TEXT,
+                    role TEXT NOT NULL DEFAULT 'blocked',
                     is_admin INTEGER NOT NULL DEFAULT 0,
                     is_timed_in INTEGER NOT NULL DEFAULT 0,
                     shift_start_at TEXT,
@@ -277,6 +313,19 @@ class ActivityRepository:
             }
             if "rest_day_date" not in columns:
                 conn.execute("ALTER TABLE staff ADD COLUMN rest_day_date TEXT")
+            if "role" not in columns:
+                conn.execute("ALTER TABLE staff ADD COLUMN role TEXT NOT NULL DEFAULT 'blocked'")
+                conn.execute(
+                    """
+                    UPDATE staff
+                    SET role = CASE
+                        WHEN user_id = ? THEN ?
+                        WHEN is_admin = 1 THEN ?
+                        ELSE ?
+                    END
+                    """,
+                    (OWNER_ID, ROLE_OWNER, ROLE_ADMIN, ROLE_BLOCKED),
+                )
 
     def _migrate_legacy_schema(self, conn: sqlite3.Connection) -> None:
         columns = {
@@ -291,6 +340,7 @@ class ActivityRepository:
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     full_name TEXT,
+                    role TEXT NOT NULL DEFAULT 'blocked',
                     is_admin INTEGER NOT NULL DEFAULT 0,
                     is_timed_in INTEGER NOT NULL DEFAULT 0,
                     shift_start_at TEXT,
@@ -302,10 +352,20 @@ class ActivityRepository:
             )
             conn.execute(
                 """
-                INSERT INTO staff (user_id, username, full_name, is_timed_in, shift_start_at, last_time_out_at, last_chat_id)
-                SELECT chat_id, username, full_name, is_timed_in, shift_start_at, last_time_out_at, chat_id
+                INSERT INTO staff (user_id, username, full_name, role, is_timed_in, shift_start_at, last_time_out_at, last_chat_id)
+                SELECT chat_id, username, full_name,
+                       CASE
+                           WHEN chat_id = {owner_id} THEN '{owner_role}'
+                           WHEN is_timed_in IN (0, 1) THEN '{blocked_role}'
+                           ELSE '{blocked_role}'
+                       END,
+                       is_timed_in, shift_start_at, last_time_out_at, chat_id
                 FROM staff_legacy
-                """
+                """.format(
+                    owner_id=OWNER_ID,
+                    owner_role=ROLE_OWNER,
+                    blocked_role=ROLE_BLOCKED,
+                )
             )
             conn.execute("DROP TABLE staff_legacy")
 
@@ -338,27 +398,46 @@ class ActivityRepository:
             )
             conn.execute("DROP TABLE activity_sessions_legacy")
 
-    def upsert_staff(
-        self,
-        user_id: int,
-        username: str,
-        full_name: str,
-        is_admin: bool,
-        last_chat_id: int,
-    ) -> None:
+    def upsert_staff(self, user_id: int, username: str, full_name: str, last_chat_id: int) -> None:
+        default_role = ROLE_OWNER if user_id == OWNER_ID else (ROLE_ADMIN if user_id in ADMIN_IDS else ROLE_BLOCKED)
         with self.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO staff (user_id, username, full_name, is_admin, last_chat_id)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO staff (user_id, username, full_name, role, is_admin, last_chat_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     username = excluded.username,
                     full_name = excluded.full_name,
-                    is_admin = excluded.is_admin,
                     last_chat_id = excluded.last_chat_id
                 """,
-                (user_id, username, full_name, int(is_admin), last_chat_id),
+                (
+                    user_id,
+                    username,
+                    full_name,
+                    default_role,
+                    int(default_role in {ROLE_OWNER, ROLE_ADMIN}),
+                    last_chat_id,
+                ),
             )
+
+    def set_role(self, user_id: int, role: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE staff
+                SET role = ?, is_admin = ?
+                WHERE user_id = ?
+                """,
+                (role, int(role in {ROLE_OWNER, ROLE_ADMIN}), user_id),
+            )
+
+    def get_users_by_roles(self, roles: tuple[str, ...]):
+        placeholders = ",".join("?" for _ in roles)
+        with self.connection() as conn:
+            return conn.execute(
+                f"SELECT * FROM staff WHERE role IN ({placeholders}) ORDER BY full_name, username, user_id",
+                roles,
+            ).fetchall()
 
     def get_staff(self, user_id: int) -> Optional[sqlite3.Row]:
         with self.connection() as conn:
@@ -564,13 +643,12 @@ class ActivityService:
     def __init__(self, repository: ActivityRepository) -> None:
         self.repository = repository
 
-    def register_user(self, update: Update, is_admin: bool) -> sqlite3.Row:
+    def register_user(self, update: Update) -> sqlite3.Row:
         user = update.effective_user
         self.repository.upsert_staff(
             user_id=user.id,
             username=user.username or "",
             full_name=" ".join(part for part in [user.first_name, user.last_name] if part),
-            is_admin=is_admin,
             last_chat_id=update.effective_chat.id,
         )
         return self.repository.get_staff(user.id)
@@ -931,26 +1009,8 @@ REPOSITORY = ActivityRepository(DATABASE_PATH)
 SERVICE = ActivityService(REPOSITORY)
 
 
-async def is_admin_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    user_id = update.effective_user.id
-    if user_id in ADMIN_IDS:
-        return True
-
-    chat = update.effective_chat
-    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
-        return False
-
-    try:
-        member = await context.bot.get_chat_member(chat.id, user_id)
-    except Exception:
-        LOGGER.exception("Failed to get chat member for admin detection")
-        return False
-    return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
-
-
 async def ensure_registered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> sqlite3.Row:
-    is_admin = await is_admin_user(update, context)
-    return SERVICE.register_user(update, is_admin)
+    return SERVICE.register_user(update)
 
 
 def monitoring_block_message() -> str:
@@ -958,6 +1018,10 @@ def monitoring_block_message() -> str:
         "Monitoring is automatically applied to non-admin staff only.\n"
         "This account is detected as admin, so activity tracking is disabled."
     )
+
+
+def blocked_message() -> str:
+    return "You are not authorized to use this bot. Please contact the owner."
 
 
 async def send_supervisor_alert(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
@@ -984,16 +1048,101 @@ async def send_html_report_document(
         )
 
 
+async def security_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if not is_owner(staff):
+        await update.message.reply_text("Only the owner can manage security.", reply_markup=keyboard_for_role(staff, "admin"))
+        return
+    await update.message.reply_text(
+        "Owner security controls:\n"
+        "/setrole <user_id> <staff|admin|blocked>\n"
+        "/users\n"
+        "/security",
+        reply_markup=keyboard_for_role(staff, "admin"),
+    )
+
+
+async def setrole_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if not is_owner(staff):
+        await update.message.reply_text("Only the owner can change roles.", reply_markup=keyboard_for_role(staff, "admin"))
+        return
+
+    args = getattr(context, "args", []) or []
+    if len(args) != 2:
+        await update.message.reply_text(
+            "Usage: /setrole <user_id> <staff|admin|blocked>",
+            reply_markup=keyboard_for_role(staff, "admin"),
+        )
+        return
+
+    user_id = int(args[0])
+    role = args[1].lower()
+    if role not in {ROLE_STAFF, ROLE_ADMIN, ROLE_BLOCKED}:
+        await update.message.reply_text(
+            "Role must be one of: staff, admin, blocked.",
+            reply_markup=keyboard_for_role(staff, "admin"),
+        )
+        return
+    if user_id == OWNER_ID:
+        await update.message.reply_text(
+            "The owner role cannot be changed with /setrole.",
+            reply_markup=keyboard_for_role(staff, "admin"),
+        )
+        return
+
+    target = REPOSITORY.get_staff(user_id)
+    if not target:
+        await update.message.reply_text(
+            "That user is not registered yet. Ask them to press /start first.",
+            reply_markup=keyboard_for_role(staff, "admin"),
+        )
+        return
+
+    REPOSITORY.set_role(user_id, role)
+    await update.message.reply_text(
+        f"Updated user {user_id} to role: {role}.",
+        reply_markup=keyboard_for_role(staff, "admin"),
+    )
+
+
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    staff = await ensure_registered(update, context)
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if not is_owner(staff):
+        await update.message.reply_text("Only the owner can view the user list.", reply_markup=keyboard_for_role(staff, "admin"))
+        return
+
+    lines = ["User Roles"]
+    for user in REPOSITORY.get_all_staff():
+        lines.append(f"{display_name(user)} | {user['user_id']} | {role_of(user)}")
+    await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff, "admin"))
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if staff["is_admin"]:
+    role = role_of(staff)
+    if role == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if has_admin_access(staff):
         lines = [
-            "Admin panel is ready.",
+            "Admin panel is ready." if role == ROLE_ADMIN else "Owner panel is ready.",
             "",
             "Admin controls are separated from the staff dashboard.",
             f"Press {STAFF_DASHBOARD_LABEL} to open the staff dashboard.",
             f"Press {COLLECT_DATA_LABEL} or {CUTOFF_REPORT_LABEL} for reports.",
         ]
+        if is_owner(staff):
+            lines.append("Press /security, /setrole, or /users to manage access.")
         await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff, "admin"))
     else:
         lines = [
@@ -1018,7 +1167,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if not staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if not has_admin_access(staff):
         await update.message.reply_text("Only admins can access the Admin Panel.", reply_markup=keyboard_for_role(staff))
         return
     await update.message.reply_text(
@@ -1029,7 +1181,10 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def staff_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if not staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if not has_admin_access(staff):
         await update.message.reply_text("You are already in the staff dashboard.", reply_markup=keyboard_for_role(staff))
         return
     await update.message.reply_text(
@@ -1040,7 +1195,10 @@ async def staff_dashboard_command(update: Update, context: ContextTypes.DEFAULT_
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if has_admin_access(staff):
         text = f"{SERVICE.active_staff_text()}\n\n{SERVICE.report_text()}"
         await update.message.reply_text(text, reply_markup=keyboard_for_role(staff, "admin"))
         return
@@ -1061,7 +1219,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if not staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if not has_admin_access(staff):
         await update.message.reply_text("Only admins can use /report.", reply_markup=keyboard_for_role(staff))
         return
     await update.message.reply_text(SERVICE.report_text(), reply_markup=keyboard_for_role(staff, "admin"))
@@ -1069,7 +1230,10 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def active_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if not staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if not has_admin_access(staff):
         await update.message.reply_text("Only admins can use /active.", reply_markup=keyboard_for_role(staff))
         return
     await update.message.reply_text(SERVICE.active_staff_text(), reply_markup=keyboard_for_role(staff, "admin"))
@@ -1077,7 +1241,10 @@ async def active_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def collect_data_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if not staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if not has_admin_access(staff):
         await update.message.reply_text("Only admins can use Collect Data.", reply_markup=keyboard_for_role(staff))
         return
 
@@ -1104,7 +1271,10 @@ async def collect_data_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def cutoff_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if not staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if not has_admin_access(staff):
         await update.message.reply_text("Only admins can use Cutoff Report.", reply_markup=keyboard_for_role(staff))
         return
 
@@ -1138,7 +1308,10 @@ async def cutoff_report_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def rest_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if role_of(staff) != ROLE_STAFF:
         await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_role(staff, "staff"))
         return
     if not staff["is_timed_in"]:
@@ -1175,7 +1348,10 @@ async def rest_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def time_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if role_of(staff) != ROLE_STAFF:
         await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_role(staff, "staff"))
         return
     if staff["is_timed_in"]:
@@ -1202,7 +1378,10 @@ async def time_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def time_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if role_of(staff) != ROLE_STAFF:
         await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_role(staff, "staff"))
         return
     if not staff["is_timed_in"]:
@@ -1228,7 +1407,10 @@ async def time_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def back_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
-    if staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if role_of(staff) != ROLE_STAFF:
         await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_role(staff, "staff"))
         return
 
@@ -1256,7 +1438,10 @@ async def back_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def start_activity(update: Update, context: ContextTypes.DEFAULT_TYPE, activity_key: str) -> None:
     staff = await ensure_registered(update, context)
-    if staff["is_admin"]:
+    if role_of(staff) == ROLE_BLOCKED:
+        await update.message.reply_text(blocked_message(), reply_markup=keyboard_for_role(staff))
+        return
+    if role_of(staff) != ROLE_STAFF:
         await update.message.reply_text(monitoring_block_message(), reply_markup=keyboard_for_role(staff, "staff"))
         return
     if not staff["is_timed_in"]:
@@ -1325,6 +1510,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if action == "staff_dashboard":
         await staff_dashboard_command(update, context)
         return
+    if action == "security_panel":
+        await security_panel_command(update, context)
+        return
     if action == "rest_day":
         await rest_day(update, context)
         return
@@ -1340,7 +1528,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def remind_active_staff(context: ContextTypes.DEFAULT_TYPE) -> None:
     for session in REPOSITORY.get_all_active_sessions():
         staff = REPOSITORY.get_staff(session["user_id"])
-        if not staff or staff["is_admin"]:
+        if not staff or role_of(staff) != ROLE_STAFF:
             continue
 
         remaining = SERVICE.remaining_seconds(session["user_id"])
@@ -1368,7 +1556,10 @@ async def remind_active_staff(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def send_daily_html_report(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not ADMIN_IDS:
+    recipients = {OWNER_ID, *ADMIN_IDS}
+    recipients.update(row["user_id"] for row in REPOSITORY.get_users_by_roles((ROLE_OWNER, ROLE_ADMIN)))
+    recipients = {user_id for user_id in recipients if user_id}
+    if not recipients:
         LOGGER.warning("Skipping daily HTML report because ADMIN_IDS is empty.")
         return
 
@@ -1376,7 +1567,7 @@ async def send_daily_html_report(context: ContextTypes.DEFAULT_TYPE) -> None:
     report_path = SERVICE.build_daily_html_report(previous_day_reference)
     report_date = format_local_date(previous_day_reference)
 
-    for admin_id in ADMIN_IDS:
+    for admin_id in recipients:
         try:
             await send_html_report_document(
                 context,
@@ -1402,6 +1593,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("cutoff", cutoff_report_command))
     app.add_handler(CommandHandler("adminpanel", admin_panel_command))
     app.add_handler(CommandHandler("staffdashboard", staff_dashboard_command))
+    app.add_handler(CommandHandler("security", security_panel_command))
+    app.add_handler(CommandHandler("setrole", setrole_command))
+    app.add_handler(CommandHandler("users", users_command))
     app.add_handler(CommandHandler("timein", time_in_command))
     app.add_handler(CommandHandler("timeout", time_out_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

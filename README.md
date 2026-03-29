@@ -2,75 +2,57 @@
 
 This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes per staff member.
 
+## Security Model
+
+- The bot now uses stored roles:
+  - `owner`
+  - `admin`
+  - `staff`
+  - `blocked`
+- New users are blocked by default unless:
+  - their Telegram ID matches `OWNER_ID`
+  - or they are pre-seeded in `ADMIN_IDS`
+- Only the `owner` can manage security and change roles.
+- Admins can use reports, but cannot approve users or change access.
+- Staff can only use staff activity functions.
+
 ## Features
 
-- Tracks staff by Telegram user ID, so it works in private chat or group chat.
-- Daily total activity allowance: 60 minutes per non-admin staff member.
 - Each staff member can only `⏱️ Time In` once per day.
 - The only activities are `☕ Break`, `🚬 Smoke`, and `🚻 CR`.
-- Activities continue running until staff press `🔙 Back`.
-- Only one activity can be active at a time. Staff must press `🔙 Back` first before selecting a new activity.
-- `⏱️ Time In` is required before any activity can start.
 - `📅 Rest Day` is not an activity. It marks the staff member as off for tomorrow and also ends the current shift.
-- `🔙 Back` ends the active activity and sends that activity summary plus the daily summary.
 - `🏁 Time Out` ends the active activity and means the staff member is still scheduled to work the next day.
 - Staff receive a button-by-button tutorial when they use `/start`.
-- The bot sends a reminder every 30 seconds only after staff exceed the 60-minute daily limit and still have not pressed `🔙 Back`.
-- If staff go beyond 60 minutes total for the day, the summary highlights the exceeded time.
-- The bot generates an HTML report every day at `1:00 AM` for the previous day, saves it on the server, and sends it only to admin accounts.
+- The bot generates an HTML report every day at `1:00 AM` for the previous day and sends it only to owner/admin accounts.
+- Admin-only reports:
+  - `📥 Collect Data` or `/collect`
+  - `📑 Cutoff Report` or `/cutoff YYYY-MM-DD YYYY-MM-DD`
 
 ## Interface Separation
 
-- Staff only see the Staff Dashboard buttons:
-  - `⏱️ Time In`
-  - `🏁 Time Out`
-  - `☕ Break`
-  - `🚬 Smoke`
-  - `🚻 CR`
-  - `📅 Rest Day`
-  - `🔙 Back`
-  - `📊 Status`
-- Admins and owners have a separate Admin Panel.
-- Admin Panel buttons are not shown to staff.
-- Admin Panel contains:
-  - `📥 Collect Data`
-  - `📑 Cutoff Report`
-  - `/report`
-  - `/active`
-- Admins can switch between:
-  - `🛠 Admin Panel`
-  - `👥 Staff Dashboard`
+- Staff only see the Staff Dashboard.
+- Admins and owners use a separate Admin Panel.
+- The owner also gets a Security option for access management.
 
-## Reports
+## Owner Commands
 
-- Daily HTML report:
-  - Runs automatically every day at `1:00 AM`
-  - Includes `Break`, `Smoke`, `CR`, `Total Used`, and `Remarks`
-  - Sent only to `ADMIN_IDS`
-- Manual HTML report:
-  - `📥 Collect Data` or `/collect`
-- Cutoff report:
-  - `📑 Cutoff Report` or `/cutoff YYYY-MM-DD YYYY-MM-DD`
-  - Groups staff alphabetically
-  - Shows `Days Worked`, `Rest Days`, and `Late` minutes
-  - Uses the current month-to-date by default when the button is pressed
+- `/security`
+- `/setrole <user_id> <staff|admin|blocked>`
+- `/users`
 
-## Setup
+## Admin Commands
 
-1. Install Python 3.11+.
-2. Create and activate a virtual environment.
-3. Install dependencies:
+- `/report`
+- `/active`
+- `/collect`
+- `/cutoff YYYY-MM-DD YYYY-MM-DD`
 
-```powershell
-pip install -r requirements.txt
-```
+## Staff Commands
 
-4. Update `.env` with your real values.
-5. Run the bot:
-
-```powershell
-python bot.py
-```
+- `/start`
+- `/status`
+- `/timein`
+- `/timeout`
 
 ## Environment
 
@@ -82,29 +64,14 @@ DAILY_LIMIT_MINUTES=60
 AUTO_CLOSE_CHECK_SECONDS=30
 REPORTS_DIR=reports
 SHIFT_START_TIME=09:00
-ADMIN_IDS=123456789,987654321
+OWNER_ID=123456789
+ADMIN_IDS=987654321
 SUPERVISOR_CHAT_ID=-1001234567890
 ```
 
-## Commands
-
-- `/start`
-- `/status`
-- `/report`
-- `/active`
-- `/collect`
-- `/cutoff YYYY-MM-DD YYYY-MM-DD`
-- `/adminpanel`
-- `/staffdashboard`
-- `/timein`
-- `/timeout`
-
 ## Notes
 
-- `ADMIN_IDS` is required if you want the daily HTML file and cutoff reports sent to admins automatically.
-- In groups, Telegram group admins are also treated as admins automatically for command access.
-- `SUPERVISOR_CHAT_ID` is optional. If set, the bot sends alerts for time in, time out, activity start, and activity end.
-- `REPORTS_DIR` is optional. It controls where HTML reports are saved on the server.
-- `SHIFT_START_TIME` is optional. It is used to calculate late minutes in cutoff reports. Default is `09:00`.
-- The bot stores data locally in `staff_activity.db`.
+- `OWNER_ID` is required for owner-only security management.
+- `ADMIN_IDS` is optional bootstrap data. The owner can later change roles with `/setrole`.
+- `SHIFT_START_TIME` is used for late-minute calculation in cutoff reports.
 - Cutoff reports are accurate for shift records created after the cutoff-report feature was added.
