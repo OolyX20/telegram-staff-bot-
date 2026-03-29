@@ -119,6 +119,17 @@ ADMIN_STAFF_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+PRIVATE_STAFF_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [TIME_IN_LABEL, TIME_OUT_LABEL],
+        [BREAK_LABEL, CR_SMOKE_LABEL],
+        [REST_DAY_LABEL],
+        [BACK_LABEL, STATUS_LABEL],
+        [ADMIN_PANEL_LABEL],
+    ],
+    resize_keyboard=True,
+)
+
 
 def utc_now() -> datetime:
     return datetime.now(tz=UTC)
@@ -262,9 +273,15 @@ async def telegram_admin_role(update: Update, context: ContextTypes.DEFAULT_TYPE
     return None
 
 
-def keyboard_for_role(staff: sqlite3.Row, panel: str = "staff") -> ReplyKeyboardMarkup:
+def keyboard_for_role(
+    staff: sqlite3.Row,
+    panel: str = "staff",
+    chat_type: Optional[str] = None,
+) -> ReplyKeyboardMarkup:
     role = role_of(staff)
     if role == ROLE_STAFF:
+        if chat_type == ChatType.PRIVATE:
+            return PRIVATE_STAFF_KEYBOARD
         return STAFF_KEYBOARD
     if panel == "admin":
         return OWNER_PANEL_KEYBOARD if role == ROLE_OWNER else ADMIN_PANEL_KEYBOARD
@@ -1092,6 +1109,7 @@ async def send_html_report_document(
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
     role = role_of(staff)
+    chat_type = update.effective_chat.type
     if has_admin_access(staff):
         lines = [
             "Admin panel is ready." if role == ROLE_ADMIN else "Owner panel is ready.",
@@ -1103,7 +1121,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"{CUTOFF_REPORT_LABEL} - Generate the cutoff summary report for the selected period.",
             f"{NAVIGATION_LABEL} - Open the staff dashboard view.",
         ]
-        await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff, "admin"))
+        await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff, "admin", chat_type))
     else:
         lines = [
             "Staff activity monitor is ready.",
@@ -1121,28 +1139,30 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Activities keep running until you press Back.",
             "Only one activity can be active at a time.",
         ]
-        await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff))
+        await update.message.reply_text("\n".join(lines), reply_markup=keyboard_for_role(staff, chat_type=chat_type))
 
 
 async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
+    chat_type = update.effective_chat.type
     if not has_admin_access(staff):
-        await update.message.reply_text("Only admins can access the Admin Panel.", reply_markup=keyboard_for_role(staff))
+        await update.message.reply_text("Only admins can access the Admin Panel.", reply_markup=keyboard_for_role(staff, chat_type=chat_type))
         return
     await update.message.reply_text(
         "Admin controls are separate from the staff dashboard.\nChoose an admin action below.",
-        reply_markup=keyboard_for_role(staff, "admin"),
+        reply_markup=keyboard_for_role(staff, "admin", chat_type),
     )
 
 
 async def staff_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     staff = await ensure_registered(update, context)
+    chat_type = update.effective_chat.type
     if not has_admin_access(staff):
-        await update.message.reply_text("You are already in the staff dashboard.", reply_markup=keyboard_for_role(staff))
+        await update.message.reply_text("You are already in the staff dashboard.", reply_markup=keyboard_for_role(staff, chat_type=chat_type))
         return
     await update.message.reply_text(
         "Staff dashboard opened.\nAdmin controls are hidden until you return to the Admin Panel.",
-        reply_markup=keyboard_for_role(staff, "staff"),
+        reply_markup=keyboard_for_role(staff, "staff", chat_type),
     )
 
 
