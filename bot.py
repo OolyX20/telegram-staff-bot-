@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import ReplyKeyboardMarkup, Update
+from telegram.constants import ChatMemberStatus, ChatType
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -230,6 +231,28 @@ def has_admin_access(staff: sqlite3.Row) -> bool:
 
 def is_owner(staff: sqlite3.Row) -> bool:
     return role_of(staff) == ROLE_OWNER
+
+
+async def telegram_admin_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+    user_id = update.effective_user.id
+    if user_id == OWNER_ID:
+        return ROLE_OWNER
+
+    chat = update.effective_chat
+    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return None
+
+    try:
+        member = await context.bot.get_chat_member(chat.id, user_id)
+    except Exception:
+        LOGGER.exception("Failed to get chat member for role detection")
+        return None
+
+    if member.status == ChatMemberStatus.OWNER:
+        return ROLE_OWNER
+    if member.status == ChatMemberStatus.ADMINISTRATOR:
+        return ROLE_ADMIN
+    return None
 
 
 def keyboard_for_role(staff: sqlite3.Row, panel: str = "staff") -> ReplyKeyboardMarkup:
@@ -1024,7 +1047,12 @@ SERVICE = ActivityService(REPOSITORY)
 
 
 async def ensure_registered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> sqlite3.Row:
-    return SERVICE.register_user(update)
+    staff = SERVICE.register_user(update)
+    detected_role = await telegram_admin_role(update, context)
+    if detected_role and role_of(staff) != detected_role:
+        REPOSITORY.set_role(staff["user_id"], detected_role)
+        staff = REPOSITORY.get_staff(staff["user_id"])
+    return staff
 
 
 def monitoring_block_message() -> str:
@@ -1035,7 +1063,7 @@ def monitoring_block_message() -> str:
 
 
 def blocked_message() -> str:
-    return "You are not authorized to use this bot. Please contact the owner."
+    return "You are not authorized to use this bot."
 
 
 async def send_supervisor_alert(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
