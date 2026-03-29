@@ -444,6 +444,16 @@ class ActivityService:
     def summary_text(self, user_id: int) -> str:
         return "\n".join(self.summary_lines(user_id))
 
+    def has_timed_in_today(self, staff: sqlite3.Row) -> bool:
+        shift_start = parse_iso(staff["shift_start_at"])
+        last_time_out = parse_iso(staff["last_time_out_at"])
+        reference = shift_start or last_time_out
+        if not reference:
+            return False
+
+        day_start, day_end = self._day_bounds()
+        return day_start <= reference < day_end
+
     def report_text(self) -> str:
         staff_rows = self.repository.get_all_staff()
         lines = ["\U0001f4cb Staff Report"]
@@ -594,6 +604,12 @@ async def time_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if staff["is_timed_in"]:
         await update.message.reply_text("You are already timed in.", reply_markup=KEYBOARD)
+        return
+    if SERVICE.has_timed_in_today(staff):
+        await update.message.reply_text(
+            "You already used your one Time In for today.\nPlease wait until the next day before timing in again.",
+            reply_markup=KEYBOARD,
+        )
         return
 
     now = utc_now()

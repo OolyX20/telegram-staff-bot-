@@ -6,6 +6,7 @@ This bot monitors staff activity 24/7 with a daily shared limit of 60 minutes pe
 
 - Tracks staff by Telegram user ID, so it works in private chat or group chat.
 - Daily total activity allowance: 60 minutes per non-admin staff member.
+- Each staff member can only `⏱️ Time In` once per day.
 - Activities continue running until staff press `🔙 Back`.
 - Only one activity can be active at a time. Staff must press `🔙 Back` first before selecting a new activity.
 - `⏱️ Time In` is required before any activity can start.
